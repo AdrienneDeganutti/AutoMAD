@@ -9,9 +9,9 @@ from src.utils.comm import get_world_size
 from src.utils.logger import LOGGER as logger
 import torch
 
-#from .caption_tensorizer import build_tensorizer
+from .caption_tensorizer import build_tensorizer
 from .data_sampler import DistributedSamplerLimited, NodeSplitSampler
-#from .vision_language_tsv import VisionLanguageTSVYamlDataset
+from .vision_language_tsv import VisionLanguageTSVYamlDataset
 
 
 def build_dataset(args, yaml_file, tokenizer, is_train=True):
