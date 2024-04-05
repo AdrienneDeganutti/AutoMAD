@@ -4,7 +4,7 @@ from typing import Tuple, List, Union, Optional
 from transformers import GPT2Tokenizer, GPT2LMHeadModel
 from collections import OrderedDict
 from einops import rearrange
-from model_tfm import PerceiverEncoder
+from .model_tfm import PerceiverEncoder
 
 
 class VideoCaptionModel(nn.Module):
