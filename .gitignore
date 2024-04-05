@@ -3,6 +3,10 @@
 .AppleDouble
 .LSOverride
 
+wandb/
+datasets/
+output/
+
 # Icon must end with two \r
 Icon
 
