@@ -2,6 +2,10 @@ from __future__ import absolute_import, division, print_function
 
 import os
 import sys
+import h5py
+import pickle as pkl
+import pandas as pd
+import csv
 
 pythonpath = os.path.abspath(
     os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
@@ -21,6 +25,9 @@ from src.configs.config import (
     shared_configs,
 )
 from src.datasets.vl_dataloader import make_data_loader
+from src.datasets.MAD_dataloader import build_dataset
+from src.modeling.gpt_utils import generate_beam, generate_greedy
+from src.transformers import GPT2LMHeadModel, GPT2Model
 from src.modeling.model_ad import VideoCaptionModel
 from src.transformers import GPT2Tokenizer
 from src.solver import AdamW, WarmupLinearLR
@@ -37,12 +44,15 @@ from src.utils.miscellaneous import (
 )
 import torch
 import torch.distributed as dist
+from torch import nn
+from torch.utils.data import DataLoader
 from datetime import timedelta
 
 
 def compute_score_with_logits(logits, labels):
     logits = torch.max(logits, -1)[1].data  # argmax
     return logits == labels
+
 
 def mixed_precision_init(args, model):
     max_iter = args.max_iter
@@ -119,10 +129,11 @@ def mixed_precision_init(args, model):
         if args.distributed:  #
             #model = DDP(model)
             model = VideoCaptionModel()
-    return args, model, optimizer, scheduler
+            GPTmodel = GPT2Model.from_pretrained("gpt2")
+    return args, model, GPTmodel, optimizer, scheduler
 
 
-def train(args, train_dataloader, val_dataloader, model, tokenizer,
+def train(args, train_dataloader, val_dataloader, model, GPTmodel, tokenizer,
           training_saver, optimizer, scheduler):
 
 
@@ -153,32 +164,49 @@ def train(args, train_dataloader, val_dataloader, model, tokenizer,
     training_saver.save_tokenizer(tokenizer)
 
 
-    for iteration, (img_keys, batch, meta_data) in enumerate(train_dataloader):
-        iteration += 1
-        data_time = time.time() - end
-        batch = tuple(t.to(args.device) for t in batch)
+    for epoch in range(args.num_train_epochs):
+        model.train()
+        for iteration, (img_keys, batch, meta_data) in enumerate(train_dataloader):
+            iteration += 1
+            data_time = time.time() - end
+            batch = tuple(t.to(args.device) for t in batch)
 
-        inputs = {
-            'input_ids': batch[0],
-            'token_type_ids': batch[1],
-            'img_feats': batch[2],
-            'input_token_ids': batch[3],
-            'output_token_ids': batch[4],
-        }
+            inputs = {
+                'input_ids': batch[0],
+                'token_type_ids': batch[1],
+                'img_feats': batch[2],
+                'input_token_ids': batch[3],
+                'output_token_ids': batch[4],
+            }
 
-        if iteration == 1:
-            for k, v in inputs.items():
-                logger.info(f'{k} = {v.shape}')
-        
-        from src.modeling.gpt_utils import generate_beam, generate_greedy
-        prefix_vector = model(batch[2])
-        greedy_search = generate_greedy(model, tokenizer, embed=prefix_vector)  #greedy search text generation
-        print(greedy_search)
-        beam_search = generate_beam(model, tokenizer, embed=prefix_vector)      #beam search text generation
-        print(beam_search)
+            #Print shape of each input
+            if iteration == 1:
+                for k, v in inputs.items():
+                    logger.info(f'{k} = {v.shape}')
 
-        end = time.time()
-        batch_time = time.time() - end
+
+            # Pass visual features and text through transformer:
+            #prefix_vector, context_embed = model(inputs['img_feats'], inputs['input_ids'])
+            
+            # Pass visual features only through transformer:
+            prefix_vector = model(inputs['img_feats'])
+
+            outputs = GPTmodel(args, inputs_embeds=prefix_vector)
+            logits = outputs[0]
+
+
+            batch_score = compute_score_with_logits(logits, inputs['output_token_ids'])
+            batch_acc = torch.mean(batch_score.float())
+   
+   
+        #prefix_vector = model(batch[2])
+        #greedy_search = generate_greedy(model, tokenizer, embed=prefix_vector)  #greedy search text generation
+        #print(greedy_search)
+        #beam_search = generate_beam(model, tokenizer, embed=prefix_vector)      #beam search text generation
+        #print(beam_search)
+
+        #end = time.time()
+        #batch_time = time.time() - end
 
 
     total_training_time = time.time() - start_training_time
@@ -189,20 +217,6 @@ def train(args, train_dataloader, val_dataloader, model, tokenizer,
 
     return
 
-
-
-def check_arguments(args):
-    # shared basic checks
-    
-    basic_check_arguments(args)
-    # additional sanity check:
-    #args.max_img_seq_length = int(
-     #   (args.max_num_frames / 2) * (int(args.img_res) / 32) *
-    #    (int(args.img_res) / 32)) + 473
-
-    if args.freeze_backbone or args.backbone_coef_lr == 0:
-        args.backbone_coef_lr = 0
-        args.freeze_backbone = True
 
 def get_custom_args(base_config):
     parser = base_config.parser
@@ -249,7 +263,7 @@ def main(args):
     args.device = torch.device(args.device)
     # Setup CUDA, GPU & distributed training
     dist_init(args)
-    check_arguments(args)
+    basic_check_arguments(args)
     mkdir(args.output_dir)
     logger.info(f"creating output_dir at: {args.output_dir}")
     set_seed(args.seed, args.num_gpus)
@@ -298,10 +312,10 @@ def main(args):
         args.global_iters_per_epoch = args.max_global_step // args.num_train_epochs
         args.save_steps = args.global_iters_per_epoch * 3
 
-        args, model, optimizer, scheduler = mixed_precision_init(
+        args, model, GPTmodel, optimizer, scheduler = mixed_precision_init(
             args, model)
         model.to(args.device)
-        train(args, train_dataloader, val_dataloader, model,
+        train(args, train_dataloader, val_dataloader, model, GPTmodel,
               tokenizer, training_saver, optimizer, scheduler)
 
 
