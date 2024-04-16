@@ -9,10 +9,10 @@ from .model_tfm import PerceiverEncoder
 
 class VideoCaptionModel(nn.Module):
     def __init__(self,
-                 num_latents: int = 10, 
+                 num_latents: int = 36, 
                  num_layers: int = 2, 
                  prefix_size: int = 512,
-                 use_context_perceiver: int = 0,
+                 use_context_perceiver: int = 1,
                  use_subtitle_perceiver: int = 0,
                  **kwargs,
                  ):
@@ -38,7 +38,8 @@ class VideoCaptionModel(nn.Module):
         assert use_context_perceiver in [0, 1]
         if use_context_perceiver == 1:
             # produce <BOS>, <EOS> around the context features 
-            self.context_special_token = nn.Embedding(2, embedding_dim=self.gpt_embedding_size)
+            #self.context_special_token = nn.Embedding(2, embedding_dim=self.gpt_embedding_size)
+            self.context_special_token = nn.Embedding(2, embedding_dim=1)
 
         ### subtitle ###
         self.use_subtitle_perceiver = use_subtitle_perceiver
@@ -54,8 +55,9 @@ class VideoCaptionModel(nn.Module):
         """assume context_embed: B,N,C. Add <bos> <eos> on it"""
         assert prompt is None
         B = context_embed.shape[0]
-        bos = self.context_special_token.weight[None, 0:1].repeat(B,1,1)
-        eos = self.context_special_token.weight[None, 1:2].repeat(B,1,1)
+        bos = self.context_special_token.weight[0].repeat(B,1)
+        eos = self.context_special_token.weight[1].repeat(B,1)
+
         return torch.cat((bos, context_embed, eos), dim=1)
 
     def wrap_subtitle(self, subtitle_embed):
@@ -65,21 +67,14 @@ class VideoCaptionModel(nn.Module):
         eos = self.subtitle_special_token.weight[None, 1:2].repeat(B,1,1)
         return torch.cat((bos, subtitle_embed, eos), dim=1)
 
+    #def forward(self, visual_feature, context_embed, mask=None, labels=None):
     def forward(self, visual_feature, mask=None, labels=None):
         """purely for visual prompt"""
         # visual_feature: b t c
         # prefix_vector: b k c
         latent_vector = self.perceiver(visual_feature)
         prefix_vector = self.project(latent_vector)
+
+        #context = self.wrap_context(context_embed)
+        #return prefix_vector, context
         return prefix_vector
-
-
-
-if __name__ == '__main__':
-    # UNIT TEST
-    from gpt_utils import generate_beam, generate_greedy
-    tokenizer = GPT2Tokenizer.from_pretrained("gpt2")
-    model = VideoCaptionModel()
-    prefix_vector = model(torch.randn(1, 1, 512))
-    print(generate_greedy(model, tokenizer, embed=prefix_vector))
-    print(generate_beam(model, tokenizer, embed=prefix_vector))
