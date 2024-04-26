@@ -802,7 +802,8 @@ class PreTrainedTokenizer(object):
             return list(
                 itertools.chain.from_iterable(
                     (
-                        self._tokenize(token, **kwargs) if token not in self.unique_added_tokens_encoder else [token]
+                        # REMOVED **KWARGS ARGUMENT FROM ORIGINAL CODE
+                        self._tokenize(token) if token not in self.unique_added_tokens_encoder else [token]
                         for token in tokenized_text
                     )
                 )
@@ -1874,7 +1875,7 @@ class PreTrainedTokenizerFast(PreTrainedTokenizer):
         self,
         text,
         text_pair=None,
-        add_special_tokens=False,
+        add_special_tokens=True,
         max_length=None,
         pad_to_max_length=False,
         stride=0,
