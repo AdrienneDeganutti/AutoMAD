@@ -87,7 +87,7 @@ class VisionLanguageTSVDataset(object):
 
         self.is_train = is_train
         #self.img_res = getattr(args, 'img_res', 224)
-        self.patch_size = getattr(args, 'patch_size', 16)
+        #self.patch_size = getattr(args, 'patch_size', 16)
 
         self.img_feature_dim = args.img_feature_dim
         self.decoder_target_fps = 5
@@ -277,8 +277,10 @@ class VisionLanguageTSVDataset(object):
 
         # Convert each number string to a float
         float_numbers = [float(num) for num in number_strings]
+        float_tensor = torch.tensor(float_numbers, dtype=torch.float32)
 
-        return np.array(float_numbers, dtype=np.float32)
+        return float_tensor
+        #return np.array(float_numbers, dtype=np.float32)
 
     def get_image(self, bytestring):
         # output numpy array (T, C, H, W), channel is RGB, T = 1
@@ -317,7 +319,7 @@ class VisionLanguageTSVDataset(object):
                 #image = np.zeros((1, _C, _H, _W), dtype=np.int64)
             #_, _C, _H, _W = image.shape                                                 #CHANGE
             frames.append(image)
-        return np.vstack(frames)
+        return torch.vstack(frames)
 
     def decode_and_get_frames(self, clip_path_name, start=None, end=None):
         # online decode raw video file, and get video frames
