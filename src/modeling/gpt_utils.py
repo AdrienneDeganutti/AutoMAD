@@ -28,13 +28,13 @@ def generate_beam(model, tokenizer, beam_size: int = 5, prompt=None, embed=None,
         if tokens is None:
             tokens = torch.tensor(tokenizer.encode(prompt)).long()
             tokens = tokens.unsqueeze(0).to(device)
-            generated = model.gpt.transformer.wte(tokens)
+            generated = model.module.gpt.transformer.wte(tokens)
     
     for i in range(entry_length):
         if media is not None:
-            outputs = model.gpt(inputs_embeds=generated, attention_mask=attention_mask, past_key_values=past_key_values, media=media)
+            outputs = model.module.gpt(inputs_embeds=generated, attention_mask=attention_mask, past_key_values=past_key_values, media=media)
         else:
-            outputs = model.gpt(inputs_embeds=generated, attention_mask=attention_mask, past_key_values=past_key_values)
+            outputs = model.module.gpt(inputs_embeds=generated, attention_mask=attention_mask, past_key_values=past_key_values)
 
         if past_key_values is not None:
             past_key_values = outputs.past_key_values
@@ -87,7 +87,7 @@ def generate_beam(model, tokenizer, beam_size: int = 5, prompt=None, embed=None,
             generated = generated[next_tokens_source]
             scores = scores_sum_average * seq_lengths
             is_stopped = is_stopped[next_tokens_source]
-        next_token_embed = model.gpt.transformer.wte(next_tokens.squeeze()).view(generated.shape[0], 1, -1)
+        next_token_embed = model.module.gpt.transformer.wte(next_tokens.squeeze()).view(generated.shape[0], 1, -1)
         if past_key_values is not None:
             generated = next_token_embed
             if i == 0:
@@ -184,13 +184,13 @@ def generate_greedy(
                 tokens = torch.tensor(tokenizer.encode(prompt)).long()
                 tokens = tokens.unsqueeze(0).to(device)
 
-            generated = model.gpt.transformer.wte(tokens)
+            generated = model.module.gpt.transformer.wte(tokens)
 
         for i in range(entry_length):
             if media is not None:
-                outputs = model.gpt(inputs_embeds=generated, attention_mask=attention_mask, past_key_values=past_key_values, media=media)
+                outputs = model.module.gpt(inputs_embeds=generated, attention_mask=attention_mask, past_key_values=past_key_values, media=media)
             else:
-                outputs = model.gpt(inputs_embeds=generated, attention_mask=attention_mask, past_key_values=past_key_values)
+                outputs = model.module.gpt(inputs_embeds=generated, attention_mask=attention_mask, past_key_values=past_key_values)
             if past_key_values is not None:
                 past_key_values = outputs.past_key_values
             logits = outputs.logits
@@ -226,7 +226,7 @@ def generate_greedy(
             # indices_to_remove = sorted_indices[sorted_indices_to_remove]
             # logits[:, indices_to_remove] = filter_value
             next_token = torch.argmax(logits, -1).unsqueeze(0)
-            next_token_embed = model.gpt.transformer.wte(next_token)
+            next_token_embed = model.module.gpt.transformer.wte(next_token)
             if tokens is None:
                 tokens = next_token
             else:
@@ -288,13 +288,13 @@ def generate_top_k_top_p(
                 tokens = torch.tensor(tokenizer.encode(prompt)).long()
                 tokens = tokens.unsqueeze(0).to(device)
 
-            generated = model.gpt.transformer.wte(tokens)
+            generated = model.module.gpt.transformer.wte(tokens)
 
         for i in range(entry_length):
             if media is not None:
-                outputs = model.gpt(inputs_embeds=generated, attention_mask=attention_mask, past_key_values=past_key_values, media=media)
+                outputs = model.module.gpt(inputs_embeds=generated, attention_mask=attention_mask, past_key_values=past_key_values, media=media)
             else:
-                outputs = model.gpt(inputs_embeds=generated, attention_mask=attention_mask, past_key_values=past_key_values)
+                outputs = model.module.gpt(inputs_embeds=generated, attention_mask=attention_mask, past_key_values=past_key_values)
             if past_key_values is not None:
                 past_key_values = outputs.past_key_values
             logits = outputs.logits
@@ -302,7 +302,7 @@ def generate_top_k_top_p(
             logits = top_k_top_p_filtering(logits, top_p=top_p, top_k=top_k)
             probs = F.softmax(logits, dim=-1)
             next_token = torch.multinomial(probs, num_samples=1)
-            next_token_embed = model.gpt.transformer.wte(next_token)
+            next_token_embed = model.module.gpt.transformer.wte(next_token)
             if tokens is None:
                 tokens = next_token
             else:
