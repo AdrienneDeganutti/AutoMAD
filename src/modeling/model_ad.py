@@ -9,7 +9,7 @@ from .model_tfm import PerceiverEncoder
 
 class VideoCaptionModel(nn.Module):
     def __init__(self,
-                 num_latents: int = 36, 
+                 num_latents: int = 38, 
                  num_layers: int = 2, 
                  prefix_size: int = 512,
                  use_context_perceiver: int = 1,
