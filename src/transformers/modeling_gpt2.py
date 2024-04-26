@@ -356,6 +356,7 @@ class GPT2Model(GPT2PreTrainedModel):
     @add_start_docstrings_to_callable(GPT2_INPUTS_DOCSTRING)
     def forward(
         self,
+        #args,
         input_ids=None,
         past=None,
         attention_mask=None,
@@ -397,6 +398,7 @@ class GPT2Model(GPT2PreTrainedModel):
         last_hidden_states = outputs[0]  # The last hidden-state is the first element of the output tuple
 
         """
+        #self.to(args.device)
         if input_ids is not None and inputs_embeds is not None:
             raise ValueError("You cannot specify both input_ids and inputs_embeds at the same time")
         elif input_ids is not None:
@@ -607,6 +609,9 @@ class GPT2LMHeadModel(GPT2PreTrainedModel):
             shift_labels = labels[..., 1:].contiguous()
             # Flatten the tokens
             loss_fct = CrossEntropyLoss()
+
+            device = 'cuda:0'
+            shift_labels = shift_labels.to(device)
             loss = loss_fct(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
             outputs = (loss,) + outputs
 
