@@ -2,10 +2,8 @@ from __future__ import absolute_import, division, print_function
 
 import os
 import sys
-import h5py
 import pickle as pkl
 import pandas as pd
-import csv
 
 pythonpath = os.path.abspath(
     os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
@@ -18,7 +16,6 @@ import time
 import wandb
 
 from apex import amp
-import tensorflow as tf
 from apex.parallel import DistributedDataParallel as DDP
 from src.configs.config import (
     basic_check_arguments,
@@ -26,14 +23,13 @@ from src.configs.config import (
     shared_configs,
 )
 from src.datasets.vl_dataloader import make_data_loader
-from src.evalcap.utils_caption_evaluate import evaluate_on_coco_caption
+from src.tasks.eval import evaluate
 from src.datasets.MAD_dataloader import build_dataset
 from src.modeling.gpt_utils import generate_beam, generate_greedy
 from src.transformers import GPT2LMHeadModel, GPT2Model
 from src.modeling.model_ad import VideoCaptionModel
 from src.modeling.caption_tokenizer import TokenizerHandler
 from src.solver import AdamW, WarmupLinearLR
-from src.utils.tsv_file_ops import reorder_tsv_keys, tsv_writer
 from src.utils.comm import dist_init, get_rank, get_world_size, is_main_process
 from src.utils.load_save import TrainingRestorer, TrainingSaver
 from src.utils.logger import LOGGER as logger
@@ -96,14 +92,13 @@ def mixed_precision_init(args, VTmodel, GPTmodel):
 def train(args, train_dataloader, val_dataloader, VTmodel, GPTmodel, tokenizer,
           training_saver, optimizer, scheduler):
 
-
-    VTmodel.train()
-    GPTmodel.train()
-
     meters = MetricLogger(delimiter='  ')
     max_iter = args.max_iter
     max_global_step = args.max_global_step
     global_iters_per_epoch = args.global_iters_per_epoch
+
+    VTmodel.train()
+    GPTmodel.train()
 
     eval_log = []
     best_score = 0
@@ -230,9 +225,27 @@ def train(args, train_dataloader, val_dataloader, VTmodel, GPTmodel, tokenizer,
                     dist.barrier()
                 if args.evaluate_during_training:
                     logger.info(f"Perform evaluation at iteration {iteration}, global_step {global_step}")
+                    evaluate_file = evaluate(args, val_dataloader, VTmodel, GPTmodel, tokenizer, checkpoint_dir)
 
+                    if get_world_size() > 1:
+                        dist.barrier()
+                    if is_main_process():
+                        with open(evaluate_file, 'r') as f:
+                            res = json.load(f)
+                        best_score = max(best_score, res['CIDEr'])
+                        res['epoch'] = epoch
+                        res['iteration'] = iteration
+                        res['best_CIDEr'] = best_score
+                        eval_log.append(res)
+                        with open(op.join(args.output_dir, args.val_yaml.replace('/', '_') + 'eval_logs.json'), 'w') as f:
+                            json.dump(eval_log, f)
+                    if get_world_size() > 1:
+                        dist.barrier()
+
+        if iteration > 2:
+            meters.update(batch_time=batch_time, data_time=data_time)
+        end = time.time()
         
-
 
     total_training_time = time.time() - start_training_time
     total_time_str = str(timedelta(seconds=total_training_time))
@@ -241,13 +254,7 @@ def train(args, train_dataloader, val_dataloader, VTmodel, GPTmodel, tokenizer,
     # Finish the Weights & Biases run
     wandb.finish()
 
-    #output text
-
-    prediction_NLP = tokenizer.decode(pred[0])
-    print(prediction_NLP)
-
-
-    return prediction_NLP
+    return checkpoint_dir
 
 
 def get_custom_args(base_config):

@@ -1,3 +1,41 @@
+import torch
+import json
+import time
+import torch.distributed as dist
+import os.path as op
+
+from tqdm import tqdm
+from src.utils.logger import LOGGER as logger
+from src.evalcap.utils_caption_evaluate import evaluate_on_coco_caption
+from src.utils.comm import get_rank, get_world_size, is_main_process
+from src.utils.miscellaneous import concat_tsv_files, delete_tsv_files
+from src.utils.tsv_file_ops import reorder_tsv_keys, tsv_writer
+
+
+def evaluate(args, val_dataloader, VTmodel, GPTmodel, tokenizer, output_dir):
+    
+    predict_file = get_predict_file(output_dir, args, val_dataloader.dataset.yaml_file)
+    test(args, val_dataloader, VTmodel, GPTmodel, tokenizer, predict_file)
+
+    if get_world_size() > 1:
+        dist.barrier()
+    evaluate_file = get_evaluate_file(predict_file)
+    if is_main_process():
+        caption_file = val_dataloader.dataset.get_caption_file_in_coco_format()
+        data = val_dataloader.dataset.yaml_file.split('/')[-2]
+        result = evaluate_on_coco_caption(predict_file,
+                                          caption_file,
+                                          outfile=evaluate_file)
+        logger.info(f'evaluation result: {str(result)}')
+        logger.info(f'evaluation result saved to {evaluate_file}')
+    if get_world_size() > 1:
+        dist.barrier()
+    return evaluate_file
+
+
+
+
+
 def get_predict_file(output_dir, args, data_yaml_file):
     cc = ['pred']
     # example data_yaml_file: datasets/coco_caption/test.yaml
@@ -20,11 +58,13 @@ def get_evaluate_file(predict_file):
 
 
 
-def test(args, test_dataloader, model, tokenizer, predict_file):
+def test(args, test_dataloader, VTmodel, GPTmodel, tokenizer, predict_file):
 
-    cls_token_id, sep_token_id, pad_token_id, mask_token_id, period_token_id = \
-        tokenizer.convert_tokens_to_ids([tokenizer.cls_token, tokenizer.sep_token,
-        tokenizer.pad_token, tokenizer.mask_token, '.'])
+    tokenizer = tokenizer.tokenizer
+
+    #cls_token_id, sep_token_id, pad_token_id, mask_token_id, period_token_id = \
+     #   tokenizer._convert_token_to_id([tokenizer.cls_token, tokenizer.sep_token,
+    #    tokenizer.pad_token, tokenizer.mask_token, '.'])
     world_size = get_world_size()
     if world_size == 1:
         cache_file = predict_file
@@ -33,7 +73,8 @@ def test(args, test_dataloader, model, tokenizer, predict_file):
         cache_file = op.splitext(predict_file)[0] + '_{}_{}'.format(
             get_rank(), world_size) + op.splitext(predict_file)[1]
 
-    model.eval()
+    VTmodel.eval()
+    GPTmodel.eval()
 
     def gen_rows():
         time_meter = 0
@@ -48,7 +89,7 @@ def test(args, test_dataloader, model, tokenizer, predict_file):
                         exist_key2pred[parts[0]] = parts[1]
 
         with torch.no_grad():
-            for step, (img_keys, batch, meta_data) in tqdm(enumerate(test_dataloader)):
+            for step, (img_keys, caption, visual_frame) in tqdm(enumerate(test_dataloader)):
                 # torch.cuda.empty_cache()
                 is_exist = True
                 for k in img_keys:
@@ -59,51 +100,24 @@ def test(args, test_dataloader, model, tokenizer, predict_file):
                     for k in img_keys:
                         yield k, exist_key2pred[k]
                     continue
-                batch = tuple(t.to(args.device) for t in batch)
-                inputs = {
-                    'is_decode': True,
-                    'input_ids': batch[0],
-                    'attention_mask': batch[1],
-                    'token_type_ids': batch[2],
-                    'img_feats': batch[3],
-                    'audio_feat': batch[4],
-                    'masked_pos': batch[5],
-                    'input_token_ids': batch[6],
-                    'output_token_ids': batch[7],
-                    'do_sample': False,
-                    'bos_token_id': cls_token_id,
-                    'pad_token_id': pad_token_id,
-                    'eos_token_ids': [sep_token_id],
-                    'mask_token_id': mask_token_id,
-                    # for adding od labels
-                    'add_od_labels': args.add_od_labels,
-                    'od_labels_start_posid': args.max_seq_a_length,
-                    # hyperparameters of beam search
-                    'max_length': args.max_gen_length,
-                    'num_beams': args.num_beams,
-                    "temperature": args.temperature,
-                    "top_k": args.top_k,
-                    "top_p": args.top_p,
-                    "repetition_penalty": args.repetition_penalty,
-                    "length_penalty": args.length_penalty,
-                    "num_return_sequences": args.num_return_sequences,
-                    "num_keep_best": args.num_keep_best,
-                }
 
                 tic = time.time()
-                # captions, logprobs
 
-                outputs = model(**inputs)
+                visual_frame = visual_frame.to(args.device)
+                prefix_vector = VTmodel(visual_frame, img_keys)
+                outputs = GPTmodel(inputs_embeds=prefix_vector)
+
                 time_meter += time.time() - tic
                 all_caps = outputs[0]  # batch_size * num_keep_best * max_len
-                all_confs = torch.exp(outputs[1])
+                #all_confs = torch.exp(outputs[1])
 
-                for img_key, caps, confs in zip(img_keys, all_caps, all_confs):
+                for img_key, caps in zip(img_keys, all_caps):
                     res = []
-                    for cap, conf in zip(caps, confs):
-                        cap = tokenizer.decode(cap.tolist(),
-                                               skip_special_tokens=True)
-                        res.append({'caption': cap, 'conf': conf.item()})
+                    
+                    caps = torch.max(caps, -1)[1].data
+                    cap = tokenizer.decode(caps)
+                    res.append({'caption': cap})
+                    
                     if isinstance(img_key, torch.Tensor):
                         img_key = img_key.item()
                     yield img_key, json.dumps(res)
@@ -124,24 +138,3 @@ def test(args, test_dataloader, model, tokenizer, predict_file):
                          predict_file)
     if world_size > 1:
         dist.barrier()
-
-
-def evaluate(args, val_dataloader, model, tokenizer, output_dir):
-    predict_file = get_predict_file(output_dir, args,
-                                    val_dataloader.dataset.yaml_file)
-    test(args, val_dataloader, model, tokenizer, predict_file)
-
-    if get_world_size() > 1:
-        dist.barrier()
-    evaluate_file = get_evaluate_file(predict_file)
-    if is_main_process():
-        caption_file = val_dataloader.dataset.get_caption_file_in_coco_format()
-        data = val_dataloader.dataset.yaml_file.split('/')[-2]
-        result = evaluate_on_coco_caption(predict_file,
-                                          caption_file,
-                                          outfile=evaluate_file)
-        logger.info(f'evaluation result: {str(result)}')
-        logger.info(f'evaluation result saved to {evaluate_file}')
-    if get_world_size() > 1:
-        dist.barrier()
-    return evaluate_file
