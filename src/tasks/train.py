@@ -31,7 +31,7 @@ from src.datasets.MAD_dataloader import build_dataset
 from src.modeling.gpt_utils import generate_beam, generate_greedy
 from src.transformers import GPT2LMHeadModel, GPT2Model
 from src.modeling.model_ad import VideoCaptionModel
-from src.transformers import GPT2Tokenizer
+from src.modeling.caption_tokenizer import TokenizerHandler
 from src.solver import AdamW, WarmupLinearLR
 from src.utils.tsv_file_ops import reorder_tsv_keys, tsv_writer
 from src.utils.comm import dist_init, get_rank, get_world_size, is_main_process
@@ -90,15 +90,13 @@ def mixed_precision_init(args, VTmodel, GPTmodel):
 
 
 
-def train(args, train_dataloader, val_dataloader, encoded, model, GPTmodel, tokenizer,
+def train(args, train_dataloader, val_dataloader, VTmodel, GPTmodel, tokenizer,
           training_saver, optimizer, scheduler):
 
-    # Initialize wandb
-    if args.rank == 0:
-        wandb.init(project="Auto-MAD", name="Debugging")
 
+    VTmodel.train()
+    GPTmodel.train()
 
-    encoded = encoded.to(args.device)
     meters = MetricLogger(delimiter='  ')
     max_iter = args.max_iter
     max_global_step = args.max_global_step
@@ -113,7 +111,7 @@ def train(args, train_dataloader, val_dataloader, encoded, model, GPTmodel, toke
     running_batch_acc = RunningMeter('train_batch_acc')
 
     if args.restore_ratio > 0:
-        restorer = TrainingRestorer(args, model, optimizer)
+        restorer = TrainingRestorer(args, VTmodel, optimizer)
         global_step = restorer.global_step
     else:
         global_step = 0
@@ -123,65 +121,55 @@ def train(args, train_dataloader, val_dataloader, encoded, model, GPTmodel, toke
         restorer = NoOp()
 
     training_saver.save_args(args)
-    training_saver.save_tokenizer(tokenizer)
+    #training_saver.save_tokenizer(tokenizer)
 
     train_loss_dict = {}
+    epoch = 0
 
 
-    for iteration, (img_keys, batch, meta_data) in enumerate(train_dataloader):
+    for iteration, (img_ID, caption, visual_frame) in enumerate(train_dataloader):
         iteration += 1
         data_time = time.time() - end
-        batch = tuple(t.to(args.device) for t in batch)
 
-        model.train()
-        GPTmodel.train()
+        # Tokenize and pad caption:
+        tokenized_caption = tokenizer.tokenize_caption(args, caption, img_ID)
+        
+        visual_frame = visual_frame.to(args.device)
 
-        inputs = {
-            'input_ids': batch[0],
-            'token_type_ids': batch[1],
-            'img_feats': batch[2],
-            'input_token_ids': batch[3],
-            'output_token_ids': batch[4],
-        }
+        VTmodel.zero_grad()
+        GPTmodel.zero_grad()
 
         #Print shape of each input
-        if iteration == 1:
-            for k, v in inputs.items():
-                logger.info(f'{k} = {v.shape}')
+        #if iteration == 1:
+        logger.info(f'ID: {img_ID}')
+        logger.info(f'visual features = {visual_frame.shape}')
+        logger.info(f'padded caption = {tokenized_caption.shape}')
 
-
-        model.zero_grad()
-        GPTmodel.zero_grad()
         # Pass visual features and text through transformer:
         #prefix_vector, context_embed = model(inputs['img_feats'], encoded)
             
         # Pass visual features only through transformer:
-        prefix_vector = model(inputs['img_feats'])
+        prefix_vector = VTmodel(visual_frame, img_ID)
 
         add = -100*torch.ones(1,1,768)
         add = add.to(args.device)
         prefix_vector = torch.cat((prefix_vector, add), dim=1)
 
         
-        outputs = GPTmodel(inputs_embeds=prefix_vector, labels=encoded)
+        outputs = GPTmodel(inputs_embeds=prefix_vector, labels=tokenized_caption)
         #outputs = GPTmodel(args, inputs_embeds=prefix_vector, labels=inputs['input_ids'])
         loss, logits = outputs[:2]
 
-
+        # Compute accuracy with workaround:
         pred = torch.max(logits, -1)[1].data  # argmax
-        batch_score = pred == encoded
+        #batch_score = pred == tokenized_caption
         pred_amended = pred[0][:-1]
-        encoded_amended = encoded[1:]
+        encoded_amended = tokenized_caption[1:]
         test_score = pred_amended == encoded_amended
             
         #batch_score = compute_score_with_logits(logits, encoded)
         #batch_score = compute_score_with_logits(logits, inputs['output_token_ids'])
         batch_acc = torch.mean(test_score.float())
-
-
-        #for element in pred:
-        #    if tokenizer.decode(element).startswith(' '):
-        #        element = [element[0]].strip()
 
 
         loss_dict = {
@@ -198,13 +186,36 @@ def train(args, train_dataloader, val_dataloader, encoded, model, GPTmodel, toke
             loss.backward()
             optimizer.step()
             scheduler.step()
+            
 
-            #Add weights and biases logging
-            if args.rank == 0:
-                wandb.log({
-                    "Training Loss": loss_dict['loss'],
-                    "Accuracy": loss_dict['acc'],
-                }, step=global_step)
+        if global_step == max_global_step:
+            if 'time_info' in meters.meters:
+                avg_time = meters.meters['time_info']['compute'].global_avg
+                eta_seconds = avg_time * (max_iter - iteration)
+                eta_string = str(timedelta(seconds=int(eta_seconds)))
+            else:
+                eta_string = 'Unknown'
+            memory = torch.cuda.max_memory_allocated()
+            logger.info(meters.delimiter.join([
+                f"eta: {eta_string}",
+                f"iter: {iteration}",
+                f"global_step: {global_step}",
+                f"{meters}",
+                #f"learning rate: {optimizer.param_groups[0]["lr"]:.2e}",
+                f"max mem: {memory:.0f}",
+            ]))
+            log_start = time.time()
+        
+        if iteration % global_iters_per_epoch == 0:
+            print('\n')
+            print(f'END OF EPOCH: {epoch}')
+            print('\n')
+            epoch += 1
+        #Add weights and biases logging
+        wandb.log({
+            "Training Loss": loss_dict['loss'],
+            "Accuracy": loss_dict['acc'],
+        }, step=global_step)
 
 
     total_training_time = time.time() - start_training_time
@@ -220,7 +231,7 @@ def train(args, train_dataloader, val_dataloader, encoded, model, GPTmodel, toke
     print(prediction_NLP)
 
 
-    return checkpoint_dir
+    return prediction_NLP
 
 
 def get_custom_args(base_config):
@@ -234,6 +245,10 @@ def get_custom_args(base_config):
 
 
 def main(args):
+
+    # Initialize wandb
+    wandb.init(project="Auto-MAD", name="Debugging", settings=wandb.Settings(_service_wait=300))
+
     # global training_saver
     args.device = torch.device(args.device)
     # Setup CUDA, GPU & distributed training
@@ -264,23 +279,21 @@ def main(args):
     logger.info(f"Cuda version is: {torch.version.cuda}")
     logger.info(f"cuDNN version is : {torch.backends.cudnn.version()}")
 
-    tokenizer = GPT2Tokenizer.from_pretrained("gpt2")
-    model = VideoCaptionModel()
+    tokenizer = TokenizerHandler()
+    VTmodel = VideoCaptionModel(num_latents=args.max_seq_length)
     GPTmodel = GPT2LMHeadModel.from_pretrained("gpt2")
 
-    model.to(args.device)
+    VTmodel.to(args.device)
     GPTmodel.to(args.device)
 
     if args.do_train:
         args = restore_training_settings(args)
         train_dataloader = make_data_loader(args,
                                             args.train_yaml,
-                                            tokenizer,
                                             args.distributed,
                                             is_train=True)
         val_dataloader = make_data_loader(args,
                                           args.val_yaml,
-                                          tokenizer,
                                           args.distributed,
                                           is_train=False)
 
@@ -289,19 +302,12 @@ def main(args):
         args.global_iters_per_epoch = args.max_global_step // args.num_train_epochs
         args.save_steps = args.global_iters_per_epoch * 3
 
-        caption = train_dataloader.dataset.caption_on_memory[0,0]
-        encoded = tokenizer.encode(caption, return_tensors='pt', add_prefix_space=True, add_bos_token=True)
 
-        add = torch.tensor([-100])
-        encoded = torch.cat((add, encoded[0]), dim=0)
-
-
-        args, model, GPTmodel, optimizer, scheduler = mixed_precision_init(
-            args, model, GPTmodel)
-        model.to(args.device)
-        GPTmodel.to(args.device)
-        train(args, train_dataloader, val_dataloader, encoded, model, GPTmodel,
-              tokenizer, training_saver, optimizer, scheduler)
+        args, VTmodel, GPTmodel, optimizer, scheduler = mixed_precision_init(
+            args, VTmodel, GPTmodel)
+        
+        train(args, train_dataloader, val_dataloader, VTmodel, GPTmodel, tokenizer,
+              training_saver, optimizer, scheduler)
 
 
     if args.distributed:
