@@ -58,7 +58,10 @@ from tqdm import tqdm
 
 def compute_score_with_logits(logits, labels):
     logits = torch.max(logits, -1)[1].data  # argmax
-    return logits == labels
+    #workaround:
+    pred_amended = logits[0][:-1]
+    encoded_amended = labels[1:]
+    return pred_amended == encoded_amended
 
 
 def mixed_precision_init(args, VTmodel, GPTmodel):
@@ -116,7 +119,7 @@ def train(args, train_dataloader, val_dataloader, VTmodel, GPTmodel, tokenizer,
     else:
         global_step = 0
 
-    TB_LOGGER.global_step = global_step
+    #TB_LOGGER.global_step = global_step
     if not is_main_process() or args.restore_ratio <= 0:
         restorer = NoOp()
 
@@ -124,7 +127,6 @@ def train(args, train_dataloader, val_dataloader, VTmodel, GPTmodel, tokenizer,
     #training_saver.save_tokenizer(tokenizer)
 
     train_loss_dict = {}
-    epoch = 0
 
 
     for iteration, (img_ID, caption, visual_frame) in enumerate(train_dataloader):
@@ -133,89 +135,103 @@ def train(args, train_dataloader, val_dataloader, VTmodel, GPTmodel, tokenizer,
 
         # Tokenize and pad caption:
         tokenized_caption = tokenizer.tokenize_caption(args, caption, img_ID)
-        
-        visual_frame = visual_frame.to(args.device)
-
-        VTmodel.zero_grad()
-        GPTmodel.zero_grad()
-
-        #Print shape of each input
-        #if iteration == 1:
-        logger.info(f'ID: {img_ID}')
-        logger.info(f'visual features = {visual_frame.shape}')
-        logger.info(f'padded caption = {tokenized_caption.shape}')
-
-        # Pass visual features and text through transformer:
-        #prefix_vector, context_embed = model(inputs['img_feats'], encoded)
             
         # Pass visual features only through transformer:
-        prefix_vector = VTmodel(visual_frame, img_ID)
-
+        visual_frame = visual_frame.to(args.device)
+        prefix_vector = VTmodel(visual_frame, img_ID)   #prefix_vector, context_embed = model(inputs['img_feats'], encoded)
+        # Token shift workaround:
         add = -100*torch.ones(1,1,768)
         add = add.to(args.device)
         prefix_vector = torch.cat((prefix_vector, add), dim=1)
 
+        #Print shape of each input
+        if iteration == 1:
+            logger.info(f'ID: {img_ID}')
+            logger.info(f'visual features = {prefix_vector.shape}')
+            logger.info(f'padded caption = {tokenized_caption.shape}')
+
         
         outputs = GPTmodel(inputs_embeds=prefix_vector, labels=tokenized_caption)
-        #outputs = GPTmodel(args, inputs_embeds=prefix_vector, labels=inputs['input_ids'])
         loss, logits = outputs[:2]
-
-        # Compute accuracy with workaround:
-        pred = torch.max(logits, -1)[1].data  # argmax
-        #batch_score = pred == tokenized_caption
-        pred_amended = pred[0][:-1]
-        encoded_amended = tokenized_caption[1:]
-        test_score = pred_amended == encoded_amended
             
-        #batch_score = compute_score_with_logits(logits, encoded)
-        #batch_score = compute_score_with_logits(logits, inputs['output_token_ids'])
-        batch_acc = torch.mean(test_score.float())
+        batch_score = compute_score_with_logits(logits, tokenized_caption)
+        batch_acc = torch.mean(batch_score.float())
 
 
         loss_dict = {
-            'loss': loss,
-            'acc': batch_acc
+            'loss': float(loss),
+            'acc': float(batch_acc)
         }
 
-        train_loss_dict[iteration] = float(loss_dict['loss']), float(loss_dict['acc'])
-
         backward_now = iteration % args.gradient_accumulation_steps == 0
+            # backward pass
+        with amp.scale_loss(loss, optimizer, delay_unscale=not backward_now) as scaled_loss:
+            scaled_loss.backward()
+            
         if backward_now:
             global_step += 1
-            # backward pass
-            loss.backward()
+
+            #Add weights and biases logging
+            if is_main_process():
+                wandb.log({
+                    "Training Loss": loss_dict['loss'],
+                    "Accuracy": loss_dict['acc'],
+                }, step=global_step)
+
+            # Gradient clipping:
+            if args.max_grad_norm != -1:        
+                grad_norm = torch.nn.utils.clip_grad_norm(
+                    amp.master_params(optimizer), args.max_grad_norm)
+                if is_main_process():
+                    wandb.log({"Gradient Norm": grad_norm}, step=global_step)
+            
             optimizer.step()
             scheduler.step()
-            
+            VTmodel.zero_grad()
+            GPTmodel.zero_grad()
+            restorer.step()
 
-        if global_step == max_global_step:
-            if 'time_info' in meters.meters:
-                avg_time = meters.meters['time_info']['compute'].global_avg
-                eta_seconds = avg_time * (max_iter - iteration)
-                eta_string = str(timedelta(seconds=int(eta_seconds)))
-            else:
-                eta_string = 'Unknown'
-            memory = torch.cuda.max_memory_allocated()
-            logger.info(meters.delimiter.join([
-                f"eta: {eta_string}",
-                f"iter: {iteration}",
-                f"global_step: {global_step}",
-                f"{meters}",
-                #f"learning rate: {optimizer.param_groups[0]["lr"]:.2e}",
-                f"max mem: {memory:.0f}",
-            ]))
             log_start = time.time()
         
-        if iteration % global_iters_per_epoch == 0:
-            print('\n')
-            print(f'END OF EPOCH: {epoch}')
-            print('\n')
-            epoch += 1
-        #Add weights and biases logging
-        wandb.log({
-            "Training Loss": loss_dict['loss'],
-            "Accuracy": loss_dict['acc'],
-        }, step=global_step)
+        batch_time = time.time() - end
+            
+        if backward_now:
+            if global_step % args.logging_steps == 0 or global_step == max_global_step:
+                if 'time_info' in meters.meters:
+                    avg_time = meters.meters['time_info']['compute'].global_avg
+                    eta_seconds = avg_time * (max_iter - iteration)
+                    eta_string = str(timedelta(seconds=int(eta_seconds)))
+                else:
+                    eta_string = 'Unknown'
+                eta_seconds = batch_time * (max_iter - iteration)
+                eta_string = str(timedelta(seconds=int(eta_seconds)))
+                memory = torch.cuda.max_memory_allocated()
+                logger.info(meters.delimiter.join([
+                    f"eta: {eta_string}",
+                    f"iter: {iteration}",
+                    f"global_step: {global_step}",
+                    f"{meters}",
+                    f"learning rate: {'{:.2e}'.format(optimizer.param_groups[0]['lr'])}",
+                    f"max mem: {memory:.0f}",
+                ]))
+                log_start = time.time()
+        
+            if (args.save_steps > 0 and global_step % args.save_steps == 0
+                ) or global_step == max_global_step or global_step == 1:
+                epoch = global_step // global_iters_per_epoch
+
+                checkpoint_dir = op.join(args.output_dir, 'checkpoint-{}-{}'.format(epoch, global_step))
+                if get_world_size() > 1:
+                    dist.barrier()
+                training_saver.save_model(checkpoint_dir, global_step, VTmodel, optimizer, model_name='VTmodel')
+                training_saver.save_model(checkpoint_dir, global_step, GPTmodel, optimizer, model_name='GPTmodel')
+
+                if get_world_size() > 1:
+                    dist.barrier()
+                if args.evaluate_during_training:
+                    logger.info(f"Perform evaluation at iteration {iteration}, global_step {global_step}")
+
+        
 
 
     total_training_time = time.time() - start_training_time
@@ -247,7 +263,8 @@ def get_custom_args(base_config):
 def main(args):
 
     # Initialize wandb
-    wandb.init(project="Auto-MAD", name="Debugging", settings=wandb.Settings(_service_wait=300))
+    if is_main_process():
+        wandb.init(project="Auto-MAD", name="Debugging", settings=wandb.Settings(_service_wait=300))
 
     # global training_saver
     args.device = torch.device(args.device)
@@ -301,7 +318,6 @@ def main(args):
         args.max_global_step = args.max_iter // args.gradient_accumulation_steps
         args.global_iters_per_epoch = args.max_global_step // args.num_train_epochs
         args.save_steps = args.global_iters_per_epoch * 3
-
 
         args, VTmodel, GPTmodel, optimizer, scheduler = mixed_precision_init(
             args, VTmodel, GPTmodel)
