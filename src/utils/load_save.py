@@ -67,9 +67,9 @@ class TrainingSaver(object):
                 temp_args[key] = value
         save_json(temp_args, save_args_path, save_pretty=True, sort_keys=True)
 
-    def save_model(self, checkpoint_dir, step, model, optimizer=None):
+    def save_model(self, checkpoint_dir, step, model, optimizer=None, model_name=None):
         os.makedirs(checkpoint_dir, exist_ok=True)
-        model_path = join(checkpoint_dir, 'model.bin')
+        model_path = join(checkpoint_dir, f'{model_name}.bin')
         model_to_save = model.module if hasattr(model, 'module') else model
         state_dict = {
             k: v.cpu() if isinstance(v, torch.Tensor) else v
@@ -88,7 +88,7 @@ class TrainingSaver(object):
                         for k, v in optimizer.state_dict().items()
                     }
                     dump = {'step': step, 'optimizer': optimizer_state_dict}
-                    torch.save(dump, f'{checkpoint_dir}/optmizer_state.bin')
+                    torch.save(dump, f'{checkpoint_dir}/optimizer_state.bin')
                 LOGGER.info(f"Save checkpoint to {checkpoint_dir}")
                 break
             except Exception as e:
