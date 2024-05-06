@@ -11,10 +11,10 @@ from typing import Dict, Optional
 import numpy as np
 import torch
 
-#from .cider.pyciderevalcap.ciderD.ciderD import CiderD
-#from .coco_caption.pycocoevalcap.eval import COCOEvalCap
-#from .coco_caption.pycocoevalcap.meteor.meteor import Meteor
-#from .coco_caption.pycocotools.coco import COCO
+from .cider.pyciderevalcap.ciderD.ciderD import CiderD
+from .coco_caption.pycocoevalcap.eval import COCOEvalCap
+from .coco_caption.pycocoevalcap.meteor.meteor import Meteor
+from .coco_caption.pycocotools.coco import COCO
 
 
 def evaluate_on_nocaps(split, predict_file, evaluate_file=None):
