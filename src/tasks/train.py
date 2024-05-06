@@ -10,7 +10,6 @@ pythonpath = os.path.abspath(
 print(pythonpath)
 sys.path.insert(0, pythonpath)
 import json
-import os
 import os.path as op
 import time
 import wandb
@@ -24,9 +23,7 @@ from src.configs.config import (
 )
 from src.datasets.vl_dataloader import make_data_loader
 from src.tasks.eval import evaluate
-from src.datasets.MAD_dataloader import build_dataset
-from src.modeling.gpt_utils import generate_beam, generate_greedy
-from src.transformers import GPT2LMHeadModel, GPT2Model
+from src.transformers import GPT2LMHeadModel
 from src.modeling.model_ad import VideoCaptionModel
 from src.modeling.caption_tokenizer import TokenizerHandler
 from src.solver import AdamW, WarmupLinearLR
@@ -35,21 +32,12 @@ from src.utils.load_save import TrainingRestorer, TrainingSaver
 from src.utils.logger import LOGGER as logger
 from src.utils.logger import TB_LOGGER, RunningMeter, add_log_to_file
 from src.utils.metric_logger import MetricLogger
-from src.utils.miscellaneous import (
-    NoOp,
-    concat_tsv_files,
-    delete_tsv_files,
-    mkdir,
-    set_seed,
-    str_to_bool,
-)
+from src.utils.miscellaneous import (NoOp, mkdir, set_seed)
+
 import torch
 import torch.distributed as dist
 from torch.optim.lr_scheduler import CosineAnnealingLR
-from torch import nn
-from torch.utils.data import DataLoader
 from datetime import timedelta
-from tqdm import tqdm
 
 
 def compute_score_with_logits(logits, labels):
@@ -91,6 +79,10 @@ def mixed_precision_init(args, VTmodel, GPTmodel):
 
 def train(args, train_dataloader, val_dataloader, VTmodel, GPTmodel, tokenizer,
           training_saver, optimizer, scheduler):
+    
+    # Initialize wandb
+    if args.rank == 0:
+        wandb.init(project="Auto-MAD", name="Full-Dataset-30", settings=wandb.Settings(_service_wait=300))
 
     meters = MetricLogger(delimiter='  ')
     max_iter = args.max_iter
@@ -104,9 +96,7 @@ def train(args, train_dataloader, val_dataloader, VTmodel, GPTmodel, tokenizer,
     best_score = 0
     start_training_time = time.time()
     end = time.time()
-    log_start = time.time()
-    running_loss = RunningMeter('train_loss')
-    running_batch_acc = RunningMeter('train_batch_acc')
+
 
     if args.restore_ratio > 0:
         restorer = TrainingRestorer(args, VTmodel, optimizer)
@@ -119,9 +109,7 @@ def train(args, train_dataloader, val_dataloader, VTmodel, GPTmodel, tokenizer,
         restorer = NoOp()
 
     training_saver.save_args(args)
-    #training_saver.save_tokenizer(tokenizer)
-
-    train_loss_dict = {}
+    training_saver.save_tokenizer(tokenizer)
 
 
     for iteration, (img_ID, caption, visual_frame) in enumerate(train_dataloader):
@@ -166,27 +154,16 @@ def train(args, train_dataloader, val_dataloader, VTmodel, GPTmodel, tokenizer,
         if backward_now:
             global_step += 1
 
-            #Add weights and biases logging
-            if is_main_process():
-                wandb.log({
-                    "Training Loss": loss_dict['loss'],
-                    "Accuracy": loss_dict['acc'],
-                }, step=global_step)
-
             # Gradient clipping:
             if args.max_grad_norm != -1:        
-                grad_norm = torch.nn.utils.clip_grad_norm(
+                grad_norm = torch.nn.utils.clip_grad_norm_.grad_norm(
                     amp.master_params(optimizer), args.max_grad_norm)
-                if is_main_process():
-                    wandb.log({"Gradient Norm": grad_norm}, step=global_step)
             
             optimizer.step()
             scheduler.step()
             VTmodel.zero_grad()
             GPTmodel.zero_grad()
             restorer.step()
-
-            log_start = time.time()
         
         batch_time = time.time() - end
             
@@ -209,8 +186,16 @@ def train(args, train_dataloader, val_dataloader, VTmodel, GPTmodel, tokenizer,
                     f"learning rate: {'{:.2e}'.format(optimizer.param_groups[0]['lr'])}",
                     f"max mem: {memory:.0f}",
                 ]))
-                log_start = time.time()
-        
+            
+            if global_step % global_iters_per_epoch == 0:
+                epoch = global_step // global_iters_per_epoch
+                if args.rank == 0:
+                    wandb.log({"Gradient Norm": grad_norm,
+                                "Training Loss": loss_dict['loss'],
+                                "Accuracy": loss_dict['acc'],
+                            }, step=epoch)
+
+
             if (args.save_steps > 0 and global_step % args.save_steps == 0
                 ) or global_step == max_global_step or global_step == 1:
                 epoch = global_step // global_iters_per_epoch
@@ -268,10 +253,6 @@ def get_custom_args(base_config):
 
 
 def main(args):
-
-    # Initialize wandb
-    if is_main_process():
-        wandb.init(project="Auto-MAD", name="Debugging", settings=wandb.Settings(_service_wait=300))
 
     # global training_saver
     args.device = torch.device(args.device)
