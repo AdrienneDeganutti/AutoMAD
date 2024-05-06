@@ -9,7 +9,7 @@ from .model_tfm import PerceiverEncoder
 
 class VideoCaptionModel(nn.Module):
     def __init__(self,
-                 num_latents: int = 38, 
+                 num_latents, 
                  num_layers: int = 2, 
                  prefix_size: int = 512,
                  use_context_perceiver: int = 1,
@@ -68,11 +68,11 @@ class VideoCaptionModel(nn.Module):
         return torch.cat((bos, subtitle_embed, eos), dim=1)
 
     #def forward(self, visual_feature, context_embed, mask=None, labels=None):
-    def forward(self, visual_feature, mask=None, labels=None):
+    def forward(self, visual_feature, img_ID, mask=None, labels=None):
         """purely for visual prompt"""
         # visual_feature: b t c
         # prefix_vector: b k c
-        latent_vector = self.perceiver(visual_feature)
+        latent_vector = self.perceiver(visual_feature, img_ID)
         prefix_vector = self.project(latent_vector)
 
         #context = self.wrap_context(context_embed)
