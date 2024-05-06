@@ -33,9 +33,6 @@ def evaluate(args, val_dataloader, VTmodel, GPTmodel, tokenizer, output_dir):
     return evaluate_file
 
 
-
-
-
 def get_predict_file(output_dir, args, data_yaml_file):
     cc = ['pred']
     # example data_yaml_file: datasets/coco_caption/test.yaml
@@ -63,7 +60,7 @@ def test(args, test_dataloader, VTmodel, GPTmodel, tokenizer, predict_file):
     tokenizer = tokenizer.tokenizer
 
     #cls_token_id, sep_token_id, pad_token_id, mask_token_id, period_token_id = \
-     #   tokenizer._convert_token_to_id([tokenizer.cls_token, tokenizer.sep_token,
+    #    tokenizer._convert_token_to_id([tokenizer.cls_token, tokenizer.sep_token,
     #    tokenizer.pad_token, tokenizer.mask_token, '.'])
     world_size = get_world_size()
     if world_size == 1:
@@ -105,7 +102,7 @@ def test(args, test_dataloader, VTmodel, GPTmodel, tokenizer, predict_file):
 
                 visual_frame = visual_frame.to(args.device)
                 prefix_vector = VTmodel(visual_frame, img_keys)
-                outputs = GPTmodel(inputs_embeds=prefix_vector)
+                outputs = GPTmodel(inputs_embeds=prefix_vector, )
 
                 time_meter += time.time() - tic
                 all_caps = outputs[0]  # batch_size * num_keep_best * max_len
@@ -115,7 +112,7 @@ def test(args, test_dataloader, VTmodel, GPTmodel, tokenizer, predict_file):
                     res = []
                     
                     caps = torch.max(caps, -1)[1].data
-                    cap = tokenizer.decode(caps)
+                    cap = tokenizer.decode(caps, skip_special_tokens=True)
                     res.append({'caption': cap})
                     
                     if isinstance(img_key, torch.Tensor):
