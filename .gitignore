@@ -7,6 +7,9 @@ wandb/
 datasets/
 output/
 
+src/evalcap/cider/
+src/evalcap/coco_caption/
+
 # Icon must end with two \r
 Icon
 
