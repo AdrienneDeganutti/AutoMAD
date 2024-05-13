@@ -30,6 +30,7 @@ def evaluate(args, val_dataloader, VTmodel, GPTmodel, tokenizer, output_dir):
         logger.info(f'evaluation result saved to {evaluate_file}')
     if get_world_size() > 1:
         dist.barrier()
+        
     return evaluate_file
 
 
@@ -59,9 +60,6 @@ def test(args, test_dataloader, VTmodel, GPTmodel, tokenizer, predict_file):
 
     tokenizer = tokenizer.tokenizer
 
-    #cls_token_id, sep_token_id, pad_token_id, mask_token_id, period_token_id = \
-    #    tokenizer._convert_token_to_id([tokenizer.cls_token, tokenizer.sep_token,
-    #    tokenizer.pad_token, tokenizer.mask_token, '.'])
     world_size = get_world_size()
     if world_size == 1:
         cache_file = predict_file
@@ -70,8 +68,11 @@ def test(args, test_dataloader, VTmodel, GPTmodel, tokenizer, predict_file):
         cache_file = op.splitext(predict_file)[0] + '_{}_{}'.format(
             get_rank(), world_size) + op.splitext(predict_file)[1]
 
-    VTmodel.eval()
-    GPTmodel.eval()
+    if args.freeze_lm:
+        VTmodel.eval()
+    else:
+        VTmodel.eval()
+        GPTmodel.eval()
 
     def gen_rows():
         time_meter = 0

@@ -52,7 +52,7 @@ class TrainingSaver(object):
         tokenizer_dir = join(self.output_dir, 'tokenizer')
         os.makedirs(tokenizer_dir, exist_ok=True)
         if tokenizer is not None:
-            tokenizer.save_pretrained(tokenizer_dir)
+            tokenizer.tokenizer.save_pretrained(tokenizer_dir)
 
     def save_args(self, args):
         arg_dir = join(self.output_dir, 'log')

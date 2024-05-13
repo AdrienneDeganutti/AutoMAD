@@ -49,17 +49,21 @@ def compute_score_with_logits(logits, labels):
 
 
 def mixed_precision_init(args, VTmodel, GPTmodel):
-    max_iter = args.max_iter
     max_global_step = args.max_global_step
 
-    if args.distributed:
+    if args.freeze_lm:
+        VTmodel = DDP(VTmodel)
+        vt_parameters = VTmodel.parameters()
+        optimizer = AdamW(vt_parameters, lr=args.learning_rate, eps=args.adam_epsilon)
+    
+    else:
         VTmodel = DDP(VTmodel)
         GPTmodel = DDP(GPTmodel)
     
-    combined_parameters = list(VTmodel.parameters()) + list(GPTmodel.parameters())
-    models = [VTmodel, GPTmodel]
+        combined_parameters = list(VTmodel.parameters()) + list(GPTmodel.parameters())
+        models = [VTmodel, GPTmodel]
 
-    optimizer = AdamW(combined_parameters, lr=args.learning_rate, eps=args.adam_epsilon)
+        optimizer = AdamW(combined_parameters, lr=args.learning_rate, eps=args.adam_epsilon)
 
     if args.scheduler == "warmup_linear":
         scheduler = WarmupLinearLR(optimizer,
@@ -71,7 +75,10 @@ def mixed_precision_init(args, VTmodel, GPTmodel):
 
     if args.mixed_precision_method == "apex":
         # opt_level is O0, Apex will run as fp32
-        [VTmodel, GPTmodel], optimizer = amp.initialize(models, optimizer, enabled=True, opt_level=f'O{args.amp_opt_level}')
+        if args.freeze_lm:
+            VTmodel, optimizer = amp.initialize(VTmodel, optimizer, enabled=True, opt_level=f'O{args.amp_opt_level}')
+        else:
+            [VTmodel, GPTmodel], optimizer = amp.initialize(models, optimizer, enabled=True, opt_level=f'O{args.amp_opt_level}')
 
     return args, VTmodel, GPTmodel, optimizer, scheduler
 
@@ -82,15 +89,18 @@ def train(args, train_dataloader, val_dataloader, VTmodel, GPTmodel, tokenizer,
     
     # Initialize wandb
     if args.rank == 0:
-        wandb.init(project="Auto-MAD", name="Full-Dataset-30", settings=wandb.Settings(_service_wait=300))
+        wandb.init(project="Auto-MAD", name="Debugging", settings=wandb.Settings(_service_wait=300))
 
     meters = MetricLogger(delimiter='  ')
     max_iter = args.max_iter
     max_global_step = args.max_global_step
     global_iters_per_epoch = args.global_iters_per_epoch
 
-    VTmodel.train()
-    GPTmodel.train()
+    if args.freeze_lm:
+        VTmodel.train()
+    else:
+        VTmodel.train()
+        GPTmodel.train()
 
     eval_log = []
     best_score = 0
@@ -156,7 +166,7 @@ def train(args, train_dataloader, val_dataloader, VTmodel, GPTmodel, tokenizer,
 
             # Gradient clipping:
             if args.max_grad_norm != -1:        
-                grad_norm = torch.nn.utils.clip_grad_norm_.grad_norm(
+                grad_norm = torch.nn.utils.clip_grad_norm_(
                     amp.master_params(optimizer), args.max_grad_norm)
             
             optimizer.step()
@@ -203,8 +213,11 @@ def train(args, train_dataloader, val_dataloader, VTmodel, GPTmodel, tokenizer,
                 checkpoint_dir = op.join(args.output_dir, 'checkpoint-{}-{}'.format(epoch, global_step))
                 if get_world_size() > 1:
                     dist.barrier()
-                training_saver.save_model(checkpoint_dir, global_step, VTmodel, optimizer, model_name='VTmodel')
-                training_saver.save_model(checkpoint_dir, global_step, GPTmodel, optimizer, model_name='GPTmodel')
+                if args.freeze_lm:
+                    training_saver.save_model(checkpoint_dir, global_step, VTmodel, optimizer, model_name='VTmodel')
+                else:
+                    training_saver.save_model(checkpoint_dir, global_step, VTmodel, optimizer, model_name='VTmodel')
+                    training_saver.save_model(checkpoint_dir, global_step, GPTmodel, optimizer, model_name='GPTmodel')
 
                 if get_world_size() > 1:
                     dist.barrier()
