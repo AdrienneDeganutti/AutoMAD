@@ -10,33 +10,23 @@ class TokenizerHandler:
         self.tokenizer.pad_token = self.tokenizer.eos_token
     
 
-    def tokenize_caption(self, args, caption, img_ID):
+    def tokenize_caption(self, args, caption):
 
-        tokenized_caption = self.tokenizer.encode(caption[0], max_length=args.max_seq_length, pad_to_max_length=True, 
-                                                  return_tensors='pt', add_prefix_space=True)
+        tokenized_captions = self.tokenizer.batch_encode_plus(
+            caption, 
+            padding='max_length',         # Pads to max_length
+            truncation=True,              # Truncates to max_length
+            max_length=args.max_seq_length,
+            return_tensors='pt',
+            add_prefix_space=True,
+            pad_to_max_length=True
+    )
         
         #workaround for token shifting
-        add = torch.tensor([-100])
-        tokenized_caption = torch.cat((add, tokenized_caption[0]), dim=0)
+        prepend_token = -100
+        add = prepend_token * torch.ones((tokenized_captions['input_ids'].size(0), 1), dtype=torch.long)
+        tokenized_captions = torch.cat([add, tokenized_captions['input_ids']], dim=1)
 
-        #padded_caption = self.caption_padding(args, tokenized_caption, img_ID)
-
-        proc_tokens = tokenized_caption.to(args.device)
+        proc_tokens = tokenized_captions.to(args.device)
 
         return proc_tokens
-
-
-    def caption_padding(self, args, tokenized_caption, img_ID):
-
-        if len(tokenized_caption) > args.max_seq_length:
-            logger.info(f'Caption {img_ID} is longer than max sequence length {args.max_seq_length}. Truncating the caption to {args.max_seq_length}.')
-            tokenized_caption = tokenized_caption[:args.max_seq_length]
-    
-    
-        # Pad the tokenized caption to max_seq_length
-        pad_length = (args.max_seq_length + 1) - len(tokenized_caption)
-        pad_token = self.tokenizer.pad_token_id if self.tokenizer.pad_token_id is not None else -100
-        padding = torch.full((pad_length,), pad_token, dtype=torch.long)
-        padded_tokens = torch.cat((tokenized_caption, padding), dim=0)
-
-        return padded_tokens
