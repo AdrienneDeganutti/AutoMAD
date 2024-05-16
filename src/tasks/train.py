@@ -43,9 +43,11 @@ from datetime import timedelta
 def compute_score_with_logits(logits, labels):
     logits = torch.max(logits, -1)[1].data  # argmax
     #workaround:
-    pred_amended = logits[0][:-1]
-    encoded_amended = labels[1:]
-    return pred_amended == encoded_amended
+    pred_amended = logits[:, :-1]
+    encoded_amended = labels[:, 1:]
+    
+    correct_preds = (pred_amended == encoded_amended)
+    return correct_preds
 
 
 def mixed_precision_init(args, VTmodel, GPTmodel):
@@ -66,9 +68,8 @@ def mixed_precision_init(args, VTmodel, GPTmodel):
         optimizer = AdamW(combined_parameters, lr=args.learning_rate, eps=args.adam_epsilon)
 
     if args.scheduler == "warmup_linear":
-        scheduler = WarmupLinearLR(optimizer,
-                                   max_global_step,
-                                   warmup_ratio=args.warmup_ratio)
+        from warmup_scheduler import GradualWarmupScheduler
+        scheduler = GradualWarmupScheduler(optimizer, multiplier=1, total_epoch=args.warmup_ratio * max_global_step, after_scheduler=CosineAnnealingLR(optimizer, T_max=max_global_step))
     else:
         scheduler = CosineAnnealingLR(optimizer, T_max=max_global_step)
 
@@ -89,7 +90,7 @@ def train(args, train_dataloader, val_dataloader, VTmodel, GPTmodel, tokenizer,
     
     # Initialize wandb
     if args.rank == 0:
-        wandb.init(project="Auto-MAD", name="Debugging", settings=wandb.Settings(_service_wait=300))
+        wandb.init(project="Auto-MAD", name="50ep-dual-models", settings=wandb.Settings(_service_wait=300))
 
     meters = MetricLogger(delimiter='  ')
     max_iter = args.max_iter
@@ -121,21 +122,27 @@ def train(args, train_dataloader, val_dataloader, VTmodel, GPTmodel, tokenizer,
     training_saver.save_args(args)
     training_saver.save_tokenizer(tokenizer)
 
+    if get_world_size() > 1:
+        dist.barrier()
+
 
     for iteration, (img_ID, caption, visual_frame) in enumerate(train_dataloader):
         iteration += 1
         data_time = time.time() - end
 
+        VTmodel.zero_grad()
+        GPTmodel.zero_grad()
+
         # Tokenize and pad caption:
-        tokenized_caption = tokenizer.tokenize_caption(args, caption, img_ID)
-            
+        tokenized_caption = tokenizer.tokenize_caption(args, caption)
+
         # Pass visual features only through transformer:
         visual_frame = visual_frame.to(args.device)
         prefix_vector = VTmodel(visual_frame, img_ID)   #prefix_vector, context_embed = model(inputs['img_feats'], encoded)
+        
         # Token shift workaround:
-        add = -100*torch.ones(1,1,768)
-        add = add.to(args.device)
-        prefix_vector = torch.cat((prefix_vector, add), dim=1)
+        add = -100 * torch.ones(prefix_vector.shape[0], 1, prefix_vector.shape[2]).to(args.device)  # Shape [batch_size, 1, feature_size]
+        prefix_vector = torch.cat([add, prefix_vector], dim=1)
 
         #Print shape of each input
         if iteration == 1:
@@ -143,7 +150,6 @@ def train(args, train_dataloader, val_dataloader, VTmodel, GPTmodel, tokenizer,
             logger.info(f'visual features = {prefix_vector.shape}')
             logger.info(f'padded caption = {tokenized_caption.shape}')
 
-        
         outputs = GPTmodel(inputs_embeds=prefix_vector, labels=tokenized_caption)
         loss, logits = outputs[:2]
             
@@ -157,10 +163,11 @@ def train(args, train_dataloader, val_dataloader, VTmodel, GPTmodel, tokenizer,
         }
 
         backward_now = iteration % args.gradient_accumulation_steps == 0
-            # backward pass
+        
+        # backward pass
         with amp.scale_loss(loss, optimizer, delay_unscale=not backward_now) as scaled_loss:
             scaled_loss.backward()
-            
+
         if backward_now:
             global_step += 1
 
@@ -169,10 +176,8 @@ def train(args, train_dataloader, val_dataloader, VTmodel, GPTmodel, tokenizer,
                 grad_norm = torch.nn.utils.clip_grad_norm_(
                     amp.master_params(optimizer), args.max_grad_norm)
             
-            optimizer.step()
+            optimizer.step()            
             scheduler.step()
-            VTmodel.zero_grad()
-            GPTmodel.zero_grad()
             restorer.step()
         
         batch_time = time.time() - end
