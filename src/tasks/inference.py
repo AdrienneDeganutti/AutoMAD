@@ -13,63 +13,75 @@ import os.path as op
 import time
 
 from PIL import Image
-import av
+import cv2
 import numpy as np
+from torchvision.transforms import Compose, Resize, CenterCrop, ToTensor, Normalize
+from transformers import CLIPModel, CLIPProcessor
 from src.transformers import GPT2LMHeadModel
 from src.modeling.model_ad import VideoCaptionModel
 from src.modeling.caption_tokenizer import TokenizerHandler
 from src.configs.config import basic_check_arguments, shared_configs
 from src.datasets.caption_tensorizer import build_tensorizer
 from src.video_utils.video_ops import extract_frames_from_video_path
-from src.video_utils.video_transforms import (
-    CenterCrop,
-    Compose,
-    Normalize,
-    Resize,
-)
-from src.video_utils.volume_transforms import ClipToTensor
 from src.utils.comm import dist_init, get_rank, get_world_size, is_main_process
 from src.utils.logger import LOGGER as logger
 from src.utils.logger import TB_LOGGER, RunningMeter, add_log_to_file
 from src.utils.miscellaneous import mkdir, set_seed, str_to_bool
 import torch
 
+def uniform_subsample(tensor, num_samples):
+    """
+    Uniformly subsample 'num_samples' frames from the tensor.
+    """
+    total_frames = tensor.size(0)
+    if total_frames < num_samples:
+        raise ValueError(f"Cannot subsample {num_samples} frames from {total_frames} frames.")
+    indices = torch.linspace(0, total_frames - 1, num_samples).long()
+    return tensor[indices]
+
 
 def _online_video_decode(args, video_path):
-    decoder_num_frames = getattr(args, 'max_num_frames', 2)
-    frames, _ = extract_frames_from_video_path(video_path,
-                                               target_fps=3,
-                                               num_frames=decoder_num_frames,
-                                               multi_thread_decode=False,
-                                               sampling_strategy="uniform",
-                                               safeguard_duration=False,
-                                               start=None,
-                                               end=None)
+    cap = cv2.VideoCapture(video_path)
+    frames = []
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            break
+        frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)  # Convert BGR to RGB
+        frames.append(frame)
+    cap.release()
+    
     return frames
 
 
-def _transforms(args, frames):
-    raw_video_crop_list = [
-        Resize(args.img_res),
-        CenterCrop((args.img_res, args.img_res)),
-        ClipToTensor(channel_nb=3),
+def _transforms(args, frames, num_frames):
+
+    CLIPmodel = CLIPModel.from_pretrained("openai/clip-vit-base-patch32").to(args.device)
+
+    preprocess = Compose([
+        Resize(224),
+        CenterCrop(224),
+        ToTensor(),
         Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-    ]
-    raw_video_prcoess = Compose(raw_video_crop_list)
+    ])
 
-    frames = frames.numpy()
-    frames = np.transpose(frames, (0, 2, 3, 1))
-    num_of_frames, height, width, channels = frames.shape
+    # Apply preprocessing and move to the correct device
+    frames = [preprocess(Image.fromarray(frame)) for frame in frames]
 
-    frame_list = []
-    for i in range(args.max_num_frames):
-        frame_list.append(Image.fromarray(frames[i]))
+    # Stack frames into a single tensor (B, T, C, H, W) -> (T, C, H, W)
+    frames_tensor = torch.stack(frames)
 
-    # apply normalization, output tensor (C x T x H x W) in the range [0, 1.0]
-    crop_frames = raw_video_prcoess(frame_list)
-    # (C x T x H x W) --> (T x C x H x W)
-    crop_frames = crop_frames.permute(1, 0, 2, 3)
-    return crop_frames
+     # Subsample frames
+    frames_tensor = uniform_subsample(frames_tensor, num_frames).to(args.device)
+
+    # Extract features using the CLIP model
+    with torch.no_grad():
+        features = CLIPmodel.get_image_features(frames_tensor)
+    
+    # Reshape features to add batch dimension
+    features = features.unsqueeze(0)  # Shape: (1, num_frames, 512)
+
+    return features
 
 
 def check_arguments(args):
@@ -105,15 +117,19 @@ def update_existing_config_for_inference(args):
     return train_args
 
 
-def batch_inference(args, video_path, model, tokenizer,
+def batch_inference(args, video_path, VTmodel, GPTmodel, tokenizer,
                     tensorizer):
 
-    cls_token_id, sep_token_id, pad_token_id, mask_token_id, period_token_id = \
-        tokenizer.convert_tokens_to_ids([tokenizer.cls_token, tokenizer.sep_token,
-        tokenizer.pad_token, tokenizer.mask_token, '.'])
+    tokenizer = tokenizer.tokenizer
 
-    model.float()
-    model.eval()
+    #cls_token_id, sep_token_id, pad_token_id, mask_token_id, period_token_id = \
+    #    tokenizer.convert_tokens_to_ids([tokenizer.cls_token, tokenizer.sep_token,
+    #    tokenizer.pad_token, tokenizer.mask_token, '.'])
+
+    VTmodel.float()
+    GPTmodel.float()
+    VTmodel.eval()
+    GPTmodel.eval()
 
     for video in os.listdir(video_path):
         if video.split('.')[-1] == 'mp4':
@@ -122,50 +138,14 @@ def batch_inference(args, video_path, model, tokenizer,
             logger.info(f"Load video: {v_path}")
 
             frames = _online_video_decode(args, v_path)
-            preproc_frames = _transforms(args, frames)
-            data_sample = tensorizer.tensorize_example_e2e('',
-                                                           preproc_frames,
-                                                           mode=args.att_mode)
-
-            data_sample = list(data_sample)
-            data_sample[4] = torch.Tensor(data_sample[4])
-
-            data_sample = tuple(t.to(args.device) for t in data_sample)
-
+            preproc_frames = _transforms(args, frames, num_frames=8)
+            
+            preproc_frames = preproc_frames.to(args.device)
+            
             with torch.no_grad():
 
-                inputs = None
-
-                inputs = {
-                    'is_decode': True,
-                    'input_ids': data_sample[0][None, :],
-                    'attention_mask': data_sample[1][None, :],
-                    'token_type_ids': data_sample[2][None, :],
-                    'img_feats': data_sample[3][None, :],
-                    'masked_pos': data_sample[5][None, :],
-                    'input_token_ids': data_sample[6][None, :],
-                    'output_token_ids': data_sample[7][None, :],
-                    'do_sample': False,
-                    'bos_token_id': cls_token_id,
-                    'pad_token_id': pad_token_id,
-                    'eos_token_ids': [sep_token_id],
-                    'mask_token_id': mask_token_id,
-                    # for adding od labels
-                    'add_od_labels': args.add_od_labels,
-                    'od_labels_start_posid': args.max_seq_a_length,
-                    # hyperparameters of beam search
-                    'max_length': args.max_gen_length,
-                    'num_beams': args.num_beams,
-                    "temperature": args.temperature,
-                    "top_k": args.top_k,
-                    "top_p": args.top_p,
-                    "repetition_penalty": args.repetition_penalty,
-                    "length_penalty": args.length_penalty,
-                    "num_return_sequences": args.num_return_sequences,
-                    "num_keep_best": args.num_keep_best,
-                }
                 tic = time.time()
-                outputs = model(**inputs)
+                prefix_vector = VTmodel(preproc_frames, '')
 
                 time_meter = time.time() - tic
                 all_caps = outputs[0]  # batch_size * num_keep_best * max_len
@@ -185,12 +165,6 @@ def batch_inference(args, video_path, model, tokenizer,
 def get_custom_args(base_config):
     parser = base_config.parser
     parser.add_argument('--max_num_frames', type=int, default=32)
-    parser.add_argument('--img_res', type=int, default=224)
-    parser.add_argument('--use_checkpoint',
-                        type=str_to_bool,
-                        nargs='?',
-                        const=True,
-                        default=False)
     parser.add_argument('--backbone_coef_lr', type=float, default=0.001)
     parser.add_argument('--loss_sparse_w', type=float, default=0)
     parser.add_argument('--resume_checkpoint', type=str, default='None')
@@ -269,7 +243,7 @@ def main(args):
 
     tensorizer = build_tensorizer(args, tokenizer, is_train=False)
     batch_inference(args, args.test_video_fname,
-                    vl_transformer, tokenizer, tensorizer)
+                    VTmodel, GPTmodel, tokenizer, tensorizer)
 
 
 if __name__ == "__main__":
