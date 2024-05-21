@@ -17,17 +17,14 @@ import av
 import numpy as np
 from src.configs.config import basic_check_arguments, shared_configs
 from src.datasets.caption_tensorizer import build_tensorizer
-from src.datasets.data_utils.video_ops import extract_frames_from_video_path
-from src.datasets.data_utils.video_transforms import (
+from src.video_utils.video_ops import extract_frames_from_video_path
+from src.video_utils.video_transforms import (
     CenterCrop,
     Compose,
     Normalize,
     Resize,
 )
-from src.datasets.data_utils.volume_transforms import ClipToTensor
-from src.modeling.load_bert import get_bert_model
-from src.modeling.load_swin import get_swin_model, reload_pretrained_swin
-from src.modeling.video_captioning_e2e_vid_swin_bert import VideoTransformer
+from src.video_utils.volume_transforms import ClipToTensor
 from src.utils.comm import dist_init, get_rank, get_world_size, is_main_process
 from src.utils.logger import LOGGER as logger
 from src.utils.logger import TB_LOGGER, RunningMeter, add_log_to_file
@@ -124,7 +121,7 @@ def update_existing_config_for_inference(args):
     return train_args
 
 
-def batch_inference(args, video_path, audio_path, model, tokenizer,
+def batch_inference(args, video_path, model, tokenizer,
                     tensorizer):
 
     cls_token_id, sep_token_id, pad_token_id, mask_token_id, period_token_id = \
@@ -137,7 +134,6 @@ def batch_inference(args, video_path, audio_path, model, tokenizer,
     for video in os.listdir(video_path):
         if video.split('.')[-1] == 'mp4':
             v_path = os.path.join(video_path, video)
-            a_path = os.path.join(audio_path, f'{video[:-3]}mp3')
             logger.info(f"\n")
             logger.info(f"Load video: {v_path}")
 
@@ -270,18 +266,13 @@ def get_custom_args(base_config):
 
 
 def main(args):
-
     args = update_existing_config_for_inference(args)
-
     # global training_saver
     args.device = torch.device(args.device)
     # Setup CUDA, GPU & distributed training
     dist_init(args)
     check_arguments(args)
     set_seed(args.seed, args.num_gpus)
-
-    logger.info("device: {}, n_gpu: {}, rank: {}".format(args.device, 
-                    args.num_gpus, get_rank()))
 
     if not is_main_process():
         logger.disabled = True
@@ -316,7 +307,7 @@ def main(args):
     vl_transformer.eval()
 
     tensorizer = build_tensorizer(args, tokenizer, is_train=False)
-    batch_inference(args, args.test_video_fname, args.test_audio_fname,
+    batch_inference(args, args.test_video_fname,
                     vl_transformer, tokenizer, tensorizer)
 
 
