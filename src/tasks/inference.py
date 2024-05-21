@@ -15,6 +15,9 @@ import time
 from PIL import Image
 import av
 import numpy as np
+from src.transformers import GPT2LMHeadModel
+from src.modeling.model_ad import VideoCaptionModel
+from src.modeling.caption_tokenizer import TokenizerHandler
 from src.configs.config import basic_check_arguments, shared_configs
 from src.datasets.caption_tensorizer import build_tensorizer
 from src.video_utils.video_ops import extract_frames_from_video_path
@@ -72,47 +75,28 @@ def _transforms(args, frames):
 def check_arguments(args):
     # shared basic checks
     basic_check_arguments(args)
-    # additional sanity check:
-    args.max_img_seq_length = int(
-        (args.max_num_frames / 2) * (int(args.img_res) / 32) *
-        (int(args.img_res) / 32)) + 473
 
-    if args.freeze_backbone or args.backbone_coef_lr == 0:
-        args.backbone_coef_lr = 0
-        args.freeze_backbone = True
-
-    if 'reload_pretrained_swin' not in args.keys():
-        args.reload_pretrained_swin = False
-
-    if not len(args.pretrained_checkpoint) and args.reload_pretrained_swin:
-        logger.info(
-            "No pretrained_checkpoint to be loaded, disable --reload_pretrained_swin"
-        )
-        args.reload_pretrained_swin = False
-
-    if args.learn_mask_enabled == True:
-        args.attn_mask_type = 'learn_vid_att'
+    args.backbone_coef_lr = 0
 
 
 def update_existing_config_for_inference(args):
-    ''' load swinbert args for evaluation and inference 
+    ''' load Vit & LM args for evaluation and inference 
     '''
     assert args.do_test or args.do_eval
-    checkpoint = args.eval_model_dir
-    try:
-        #json_path = op.join(checkpoint, os.pardir, 'log', 'args.json')
-        json_path = op.join(checkpoint, 'log', 'args.json')
-        f = open(json_path, 'r')
+    model_dir = args.eval_model_dir
+    checkpoint = args.checkpoint_dir
+
+    json_path = op.join(model_dir, 'log', 'args.json')
+         
+    with open(json_path, 'r') as f:
         json_data = json.load(f)
 
-        from easydict import EasyDict
-        train_args = EasyDict(json_data)
-    except Exception as e:
-        train_args = torch.load(op.join(checkpoint, 'training_args.bin'))
+    from easydict import EasyDict
+    train_args = EasyDict(json_data)
 
     train_args.eval_model_dir = args.eval_model_dir
-    train_args.resume_checkpoint = args.eval_model_dir + 'model.bin'
-    train_args.model_name_or_path = 'models/captioning/bert-base-uncased/'
+    train_args.resume_LMcheckpoint = args.eval_model_dir + checkpoint + 'GPTmodel.bin'
+    train_args.resume_VTcheckpoint = args.eval_model_dir + checkpoint + 'VTmodel.bin'
     train_args.do_train = False
     train_args.do_eval = True
     train_args.do_test = True
@@ -202,75 +186,41 @@ def get_custom_args(base_config):
     parser = base_config.parser
     parser.add_argument('--max_num_frames', type=int, default=32)
     parser.add_argument('--img_res', type=int, default=224)
-    parser.add_argument('--patch_size', type=int, default=32)
-    parser.add_argument("--grid_feat",
-                        type=str_to_bool,
-                        nargs='?',
-                        const=True,
-                        default=True)
-    parser.add_argument("--kinetics",
-                        type=str,
-                        default='400',
-                        help="400 or 600")
-    parser.add_argument("--pretrained_2d",
-                        type=str_to_bool,
-                        nargs='?',
-                        const=True,
-                        default=False)
-    parser.add_argument("--vidswin_size", type=str, default='base')
-    parser.add_argument('--freeze_backbone',
-                        type=str_to_bool,
-                        nargs='?',
-                        const=True,
-                        default=False)
     parser.add_argument('--use_checkpoint',
                         type=str_to_bool,
                         nargs='?',
                         const=True,
                         default=False)
     parser.add_argument('--backbone_coef_lr', type=float, default=0.001)
-    parser.add_argument("--reload_pretrained_swin",
-                        type=str_to_bool,
-                        nargs='?',
-                        const=True,
-                        default=False)
-    parser.add_argument('--learn_mask_enabled',
-                        type=str_to_bool,
-                        nargs='?',
-                        const=True,
-                        default=False)
     parser.add_argument('--loss_sparse_w', type=float, default=0)
-    parser.add_argument('--sparse_mask_soft2hard',
-                        type=str_to_bool,
-                        nargs='?',
-                        const=True,
-                        default=False)
-    parser.add_argument(
-        '--transfer_method',
-        type=int,
-        default=-1,
-        help=
-        "0: load all SwinBERT pre-trained weights, 1: load only pre-trained sparse mask"
-    )
-    parser.add_argument(
-        '--att_mask_expansion',
-        type=int,
-        default=-1,
-        help=
-        "-1: random init, 0: random init and then diag-based copy, 1: interpolation"
-    )
     parser.add_argument('--resume_checkpoint', type=str, default='None')
     parser.add_argument('--test_video_fname', type=str, default='None')
+    parser.add_argument('--test_features', type=str, default='None')
     args = base_config.parse_args()
     return args
 
+def freeze_models(VTmodel, GPTmodel):
+    for param in VTmodel.parameters():
+        param.requires_grad = False
+    for param in GPTmodel.parameters():
+        param.requires_grad = False
+    
+    #Verify the paramers are frozen:
+    for name, param in VTmodel.named_parameters():
+        print(f"{name}: requires_grad={param.requires_grad}")
+    for name, param in GPTmodel.named_parameters():
+        print(f"{name}: requires_grad={param.requires_grad}")
+
 
 def main(args):
+    
     args = update_existing_config_for_inference(args)
+    
     # global training_saver
     args.device = torch.device(args.device)
-    # Setup CUDA, GPU & distributed training
-    dist_init(args)
+    
+    # Setup CUDA, GPU & distributed training(?)
+    #dist_init(args)
     check_arguments(args)
     set_seed(args.seed, args.num_gpus)
 
@@ -281,30 +231,41 @@ def main(args):
     logger.info(f"Cuda version is: {torch.version.cuda}")
     logger.info(f"cuDNN version is : {torch.backends.cudnn.version()}")
 
-    # Get Video Swin model
-    swin_model = get_swin_model(args)
-    # Get BERT and tokenizer
-    bert_model, config, tokenizer = get_bert_model(args)
-    # build SwinBERT based on training configs
-    vl_transformer = VideoTransformer(args, config, swin_model, bert_model)
-    vl_transformer.freeze_backbone(freeze=args.freeze_backbone)
+    # Get Vision Transformer, LLM and Tokenizer:
+    VTmodel = VideoCaptionModel(num_latents=args.max_seq_length)
+    GPTmodel = GPT2LMHeadModel.from_pretrained("gpt2")
+    tokenizer = TokenizerHandler()
+
+    # Freeze models
+    freeze_models(VTmodel, GPTmodel)
 
     # load weights for inference
-    logger.info(f"Loading state dict from checkpoint {args.resume_checkpoint}")
+    logger.info(f"Loading LM from checkpoint {args.resume_LMcheckpoint}")
+    logger.info(f"Loading Vision Transformer from checkpoint {args.resume_VTcheckpoint}")
     cpu_device = torch.device('cpu')
-    pretrained_model = torch.load(args.resume_checkpoint,
+    LM_pretrained_model = torch.load(args.resume_LMcheckpoint,
+                                  map_location=cpu_device)
+    VT_pretrained_model = torch.load(args.resume_VTcheckpoint,
                                   map_location=cpu_device)
 
-    if isinstance(pretrained_model, dict):
-        rst = vl_transformer.load_state_dict(pretrained_model, strict=True)
+    if isinstance(LM_pretrained_model, dict):
+        LM_rst = GPTmodel.load_state_dict(LM_pretrained_model, strict=True)
     else:
-        rst = vl_transformer.load_state_dict(pretrained_model.state_dict(),
-                                             strict=True)
+        LM_rst = GPTmodel.load_state_dict(LM_pretrained_model.state_dict(), strict=True)
+    
+    logger.info(f'Result of loading LM weights: {LM_rst}')
 
-    logger.info(f'Result of loading weights: {rst}')
+    if isinstance(VT_pretrained_model, dict):
+        VT_rst = VTmodel.load_state_dict(VT_pretrained_model, strict=True)
+    else:
+        VT_rst = GPTmodel.load_state_dict(VT_pretrained_model.state_dict(), strict=True)
 
-    vl_transformer.to(args.device)
-    vl_transformer.eval()
+    logger.info(f'Result of loading VT weights: {VT_rst}')
+
+    GPTmodel.to(args.device)
+    VTmodel.to(args.device)
+    GPTmodel.eval()
+    VTmodel.eval()
 
     tensorizer = build_tensorizer(args, tokenizer, is_train=False)
     batch_inference(args, args.test_video_fname,
