@@ -7,23 +7,26 @@ import json
 def uniform_subsample(tensor, num_samples):
     """
     Uniformly subsample 'num_samples' frames from the tensor.
-    If the total_frames is less than num_samples, pad with zeros to match the desired size.
+    If the total_frames is less than num_samples, exclude from dataset.
     """
     total_frames = tensor.size(0)
-    if total_frames == 0:
-        raise ValueError("Tensor has no frames.")
-    if total_frames < num_samples:
-        padded_tensor = torch.zeros((num_samples, *tensor.shape[1:]), dtype=tensor.dtype, device=tensor.device)
-        padded_tensor[:total_frames] = tensor
-        return padded_tensor
+    if total_frames == 0 or total_frames < num_samples:
+        # INPUT TEXT FILE NAME: #
+        f = open("/home/adrienne/AutoMAD/output/test-clips-under-8frames.txt", "a")
+        f.write(annotation_ID)
+        f.write('\n')
+        f.close()
+        return None
     indices = torch.linspace(0, total_frames - 1, num_samples).long()
     return tensor[indices]
 
+# INPUT FILE DIRECTORIES: #
 video_features_file = '/mnt/welles/scratch/adrienne/MAD/features/CLIP_B32_frames_features_5fps.h5'
 annotations_file = '/mnt/welles/scratch/adrienne/MAD/annotations/MAD-v1/MAD_test.json'
 output_file = '/home/adrienne/AutoMAD/datasets/test/8_frames_test_features.tsv'
 
-frames_sampling = 1
+# INPUT FRAME SAMPLING: #
+frames_sampling = 8
 
 print('Loading cached annotations...')
 with open(annotations_file, 'r') as f:
@@ -66,8 +69,11 @@ with open(output_file, 'w', newline='') as file:
             segmented_feature_tensor = full_feature_tensor[start_frame:end_frame + 1]
             subsampled_feature_tensor = uniform_subsample(segmented_feature_tensor, frames_sampling)
 
-            # Write annotation ID and frame tensors in one line
-            row = [annotation_ID] + [frame_tensor.numpy().tolist() for frame_tensor in subsampled_feature_tensor]
-            writer.writerow(row)
+            if subsampled_feature_tensor == None:
+                continue
+            else:    
+                # Write annotation ID and frame tensors in one line
+                row = [annotation_ID] + [frame_tensor.numpy().tolist() for frame_tensor in subsampled_feature_tensor]
+                writer.writerow(row)
 
-            previous_movie_id = movie_ID
+                previous_movie_id = movie_ID
