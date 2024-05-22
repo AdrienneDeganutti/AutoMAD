@@ -15,18 +15,21 @@ import time
 from PIL import Image
 import cv2
 import numpy as np
+from tqdm import tqdm
+from src.datasets.vl_dataloader import make_data_loader
 from torchvision.transforms import Compose, Resize, CenterCrop, ToTensor, Normalize
 from transformers import CLIPModel, CLIPProcessor
 from src.transformers import GPT2LMHeadModel
 from src.modeling.model_ad import VideoCaptionModel
 from src.modeling.caption_tokenizer import TokenizerHandler
+from src.evalcap.utils_caption_evaluate import evaluate_on_coco_caption
 from src.configs.config import basic_check_arguments, shared_configs
 from src.datasets.caption_tensorizer import build_tensorizer
-from src.video_utils.video_ops import extract_frames_from_video_path
 from src.utils.comm import dist_init, get_rank, get_world_size, is_main_process
 from src.utils.logger import LOGGER as logger
 from src.utils.logger import TB_LOGGER, RunningMeter, add_log_to_file
-from src.utils.miscellaneous import mkdir, set_seed, str_to_bool
+from src.utils.miscellaneous import set_seed, concat_tsv_files, delete_tsv_files
+from src.utils.tsv_file_ops import reorder_tsv_keys, tsv_writer
 import torch
 
 def uniform_subsample(tensor, num_samples):
@@ -113,53 +116,123 @@ def update_existing_config_for_inference(args):
     train_args.do_eval = True
     train_args.do_test = True
     train_args.val_yaml = args.val_yaml
+    train_args.test_yaml = args.test_yaml
     train_args.test_video_fname = args.test_video_fname
     return train_args
 
+def get_predict_file(output_dir, args, data_yaml_file):
+    cc = ['pred']
+    # example data_yaml_file: datasets/coco_caption/test.yaml
+    data = data_yaml_file.split('/')[-2]
+    if data != 'coco_caption':
+        cc.append(data)
+    cc.append(op.splitext(op.basename(data_yaml_file))[0])
+    cc.append('beam{}'.format(args.num_beams))
+    cc.append('max{}'.format(args.max_gen_length))
+    if args.num_keep_best != 1:
+        cc.append('best{}'.format(args.num_keep_best))
+    if args.output_hidden_states:
+        cc.append('hidden')
+    return op.join(output_dir, '{}.tsv'.format('.'.join(cc)))
 
-def batch_inference(args, video_path, VTmodel, GPTmodel, tokenizer,
-                    tensorizer):
+
+def get_evaluate_file(predict_file):
+    assert predict_file.endswith('.tsv')
+    return op.splitext(predict_file)[0] + '.eval.json'
+
+
+def evaluate(args, test_dataloader, VTmodel, GPTmodel, tokenizer, output_dir):
+    
+    predict_file = get_predict_file(output_dir, args, test_dataloader.dataset.yaml_file)
+    batch_inference(args, test_dataloader, VTmodel, GPTmodel, tokenizer, predict_file)
+
+    evaluate_file = get_evaluate_file(predict_file)
+    if is_main_process():
+        caption_file = test_dataloader.dataset.get_caption_file_in_coco_format()
+        data = test_dataloader.dataset.yaml_file.split('/')[-2]
+        result = evaluate_on_coco_caption(predict_file,
+                                          caption_file,
+                                          outfile=evaluate_file)
+        logger.info(f'evaluation result: {str(result)}')
+        logger.info(f'evaluation result saved to {evaluate_file}')
+        
+    return evaluate_file
+
+
+def batch_inference(args, test_dataloader, VTmodel, GPTmodel, tokenizer, predict_file):
 
     tokenizer = tokenizer.tokenizer
 
-    #cls_token_id, sep_token_id, pad_token_id, mask_token_id, period_token_id = \
-    #    tokenizer.convert_tokens_to_ids([tokenizer.cls_token, tokenizer.sep_token,
-    #    tokenizer.pad_token, tokenizer.mask_token, '.'])
+    cache_file = predict_file
 
     VTmodel.float()
     GPTmodel.float()
     VTmodel.eval()
     GPTmodel.eval()
 
-    for video in os.listdir(video_path):
-        if video.split('.')[-1] == 'mp4':
-            v_path = os.path.join(video_path, video)
-            logger.info(f"\n")
-            logger.info(f"Load video: {v_path}")
+    def gen_rows():
+        time_meter = 0
+        # restore existing results for long running inference tasks
+        exist_key2pred = {}
+        tmp_file = cache_file + '.tmp.copy'
+        if op.isfile(tmp_file):
+            with open(tmp_file, 'r') as fp:
+                for line in fp:
+                    parts = line.strip().split('\t')
+                    if len(parts) == 2:
+                        exist_key2pred[parts[0]] = parts[1]
+        
+        with torch.no_grad():
+            for step, (img_keys, caption, visual_frame) in tqdm(enumerate(test_dataloader)):
+                is_exist = True
 
-            frames = _online_video_decode(args, v_path)
-            preproc_frames = _transforms(args, frames, num_frames=8)
-            
-            preproc_frames = preproc_frames.to(args.device)
-            
-            with torch.no_grad():
+                for k in img_keys:
+                    if k not in exist_key2pred:
+                        is_exist = False
+                        break
+                if is_exist:
+                    for k in img_keys:
+                        yield k, exist_key2pred[k]
+                    continue
 
                 tic = time.time()
-                prefix_vector = VTmodel(preproc_frames, '')
+
+                visual_frame = visual_frame.to(args.device)
+
+
+            #if video.split('.')[-1] == 'mp4':
+                #v_path = os.path.join(video_path, video)
+                #logger.info(f"\n")
+                #logger.info(f"Load video: {v_path}")
+
+                #frames = _online_video_decode(args, v_path)
+                #preproc_frames = _transforms(args, frames, num_frames=8)
+            
+                #preproc_frames = preproc_frames.to(args.device)
+        
+
+                prefix_vector = VTmodel(visual_frame, img_keys)
+                outputs = GPTmodel(inputs_embeds=prefix_vector, )
+
 
                 time_meter = time.time() - tic
                 all_caps = outputs[0]  # batch_size * num_keep_best * max_len
-                all_confs = torch.exp(outputs[1])
+                #all_confs = torch.exp(outputs[1])
 
-                for caps, confs in zip(all_caps, all_confs):
-                    for cap, conf in zip(caps, confs):
-                        cap = tokenizer.decode(cap.tolist(),
-                                               skip_special_tokens=True)
-                        logger.info(f"Prediction: {cap}")
-                        logger.info(f"Conf: {conf.item()}")
+                for img_key, caps in zip(img_keys, all_caps):
+                    res = []
+                    
+                    caps = torch.max(caps, -1)[1].data
+                    cap = tokenizer.decode(caps, skip_special_tokens=True)
+                    res.append({'caption': cap})
+                    
+                    if isinstance(img_key, torch.Tensor):
+                        img_key = img_key.item()
+                    yield img_key, json.dumps(res)
 
-            logger.info(
-                f"Inference model computing time: {time_meter} seconds")
+        logger.info(f"Inference model computing time: {time_meter} seconds")
+    
+    tsv_writer(gen_rows(), cache_file)
 
 
 def get_custom_args(base_config):
@@ -236,14 +309,37 @@ def main(args):
 
     logger.info(f'Result of loading VT weights: {VT_rst}')
 
+    checkpoint_dir = op.join(args.output_dir, 'inference-subsampled-1frame')
+
     GPTmodel.to(args.device)
     VTmodel.to(args.device)
     GPTmodel.eval()
     VTmodel.eval()
 
-    tensorizer = build_tensorizer(args, tokenizer, is_train=False)
-    batch_inference(args, args.test_video_fname,
-                    VTmodel, GPTmodel, tokenizer, tensorizer)
+    eval_log = []
+    best_score = 0
+    args.test_yaml = 'metadata/test_8frames.yaml'
+
+    test_dataloader = make_data_loader(args,
+                                        args.test_yaml,
+                                        tokenizer,
+                                        is_distributed=False,
+                                        is_train=False)
+    
+    evaluate_file = evaluate(args, test_dataloader, VTmodel, GPTmodel, tokenizer, checkpoint_dir)
+
+    with open(evaluate_file, 'r') as f:
+        res = json.load(f)
+    best_score = max(best_score, res['CIDEr'])
+    res['checkpoint'] = '100ep-dual-models'
+    res['best_CIDEr'] = best_score
+    eval_log.append(res)
+    with open(op.join(checkpoint_dir, args.val_yaml.replace('/', '_') + 'eval_logs.json'), 'w') as f:
+        json.dump(eval_log, f)
+
+    #tensorizer = build_tensorizer(args, tokenizer, is_train=False)
+    #batch_inference(args, args.test_video_fname,
+    #                VTmodel, GPTmodel, tokenizer, tensorizer)
 
 
 if __name__ == "__main__":
