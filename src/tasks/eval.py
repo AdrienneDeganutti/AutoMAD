@@ -1,6 +1,7 @@
 import torch
 import json
 import time
+import wandb
 import torch.distributed as dist
 import os.path as op
 
@@ -58,7 +59,7 @@ def get_evaluate_file(predict_file):
 
 def test(args, test_dataloader, VTmodel, GPTmodel, tokenizer, predict_file):
 
-    tokenizer = tokenizer.tokenizer
+    #tokenizer = tokenizer.tokenizer
 
     world_size = get_world_size()
     if world_size == 1:
@@ -107,18 +108,34 @@ def test(args, test_dataloader, VTmodel, GPTmodel, tokenizer, predict_file):
 
                 time_meter += time.time() - tic
                 all_caps = outputs[0]  # batch_size * num_keep_best * max_len
-                #all_confs = torch.exp(outputs[1])
 
                 for img_key, caps in zip(img_keys, all_caps):
                     res = []
                     
                     caps = torch.max(caps, -1)[1].data
-                    cap = tokenizer.decode(caps, skip_special_tokens=True)
+                    cap = tokenizer.tokenizer.decode(caps, skip_special_tokens=True)
                     res.append({'caption': cap})
                     
                     if isinstance(img_key, torch.Tensor):
                         img_key = img_key.item()
                     yield img_key, json.dumps(res)
+
+            #Compute batch accuracy:
+            # Tokenize and pad caption:
+            tokenized_caption = tokenizer.tokenize_caption(args, caption)
+            encoded_amended = tokenized_caption[:, 1:]
+            correct_preds = (caps == encoded_amended[0])
+            batch_acc = torch.mean(correct_preds.float())
+
+            acc_dict = {'acc': float(batch_acc)}
+
+            if world_size > 1:
+                dist.barrier()
+            if args.rank == 0:
+                wandb.log({"Validation Accuracy": acc_dict['acc']}, step=step)
+            if world_size > 1:
+                dist.barrier()
+
 
         logger.info(
             f"Inference model computing time: {(time_meter / (step+1))} seconds per batch"
