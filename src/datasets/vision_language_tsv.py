@@ -30,7 +30,7 @@ class VisionLanguageTSVDataset(object):
                  yaml_file,
                  tokenizer,
                  tensorizer=None,
-                 is_train=True,
+                 is_train=None,
                  on_memory=False):
 
         self.args = args
@@ -385,27 +385,8 @@ class VisionLanguageTSVDataset(object):
             caption_sample = None
 
 
-        #add_od_labels = False
-        if self.args.add_od_labels == True:
-            example = self.tensorizer.tensorize_example_e2e(
-                caption,
-                preproc_frames,
-                text_b=tag,
-                text_meta=caption_sample)
-        else:
-            example = self.tensorizer.tensorize_example_e2e(
-                caption,
-                preproc_frames,
-                text_meta=caption_sample)
+        return img_key, caption, preproc_frames
 
-        # preparing outputs
-        meta_data = {}
-        meta_data['caption'] = caption  # raw text data, not tokenized
-        meta_data['img_key'] = img_key
-        meta_data['is_video'] = is_video  # True: video data, False: image data
-        meta_data['tag'] = tag
-
-        return img_key, example, meta_data
 
 
 class VisionLanguageTSVYamlDataset(VisionLanguageTSVDataset):
@@ -417,7 +398,7 @@ class VisionLanguageTSVYamlDataset(VisionLanguageTSVDataset):
                  yaml_file,
                  tokenizer,
                  tensorizer=None,
-                 is_train=True,
+                 is_train=None,
                  on_memory=False):
         # print('Init video/image captioning dataloader...')
         super(VisionLanguageTSVYamlDataset,
