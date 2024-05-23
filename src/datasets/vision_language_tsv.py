@@ -197,6 +197,7 @@ class VisionLanguageTSVDataset(object):
                 asr = data_sample['asr'].lower()
                 tag = asr
         else:
+            caption = data_sample['caption']
             if 'start' in data_sample.keys():
                 start = data_sample['start']
             if 'end' in data_sample.keys():
