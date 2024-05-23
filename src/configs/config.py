@@ -327,6 +327,11 @@ class SharedConfigs(object):
                                  type=str,
                                  default='',
                                  help="Model directory for evaluation.")
+        
+        self.parser.add_argument("--checkpoint_dir",
+                                 type=str,
+                                 default='',
+                                 help="Checkpoint directory for evaluation.")
 
         # training/validation/inference mode (only needed for captioning)
         self.parser.add_argument("--val_yaml",
@@ -336,7 +341,7 @@ class SharedConfigs(object):
                                  help="Yaml file with all data for validation")
         self.parser.add_argument(
             "--test_yaml",
-            default='coco_caption/test.yaml',
+            default='metadata/test_8frames.yaml',
             type=str,
             required=False,
             nargs='+',
@@ -553,12 +558,7 @@ def basic_check_arguments(args):
             args.per_gpu_eval_batch_size = max(args.per_gpu_eval_batch_size,
                                                args.per_gpu_train_batch_size)
 
-        if args.use_asr:
-            args.add_od_labels = True
-        if args.add_od_labels:
-            assert args.max_seq_length > args.max_seq_a_length
-        else:
-            assert args.max_seq_length == args.max_seq_a_length
+        
     if hasattr(args, 'do_test') and args.do_test:
         for test_yaml in args.test_yaml:
             check_yaml_file(op.join(args.data_dir, test_yaml))
