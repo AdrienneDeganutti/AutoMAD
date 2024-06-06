@@ -13,10 +13,11 @@ from src.utils.miscellaneous import concat_tsv_files, delete_tsv_files
 from src.utils.tsv_file_ops import reorder_tsv_keys, tsv_writer
 
 
-def evaluate(args, val_dataloader, VTmodel, GPTmodel, tokenizer, output_dir):
+def evaluate(args, val_dataloader, test_dataloader, VTmodel, GPTmodel, tokenizer, output_dir, epoch):
     
-    predict_file = get_predict_file(output_dir, args, val_dataloader.dataset.yaml_file)
-    test(args, val_dataloader, VTmodel, GPTmodel, tokenizer, predict_file)
+    val_predict_file = get_predict_file(output_dir, args, val_dataloader.dataset.yaml_file)
+    test_predict_file = get_predict_file(output_dir, args, test_dataloader.dataset.yaml_file)
+    test(args, val_dataloader, VTmodel, GPTmodel, tokenizer, val_predict_file, epoch)
 
     if get_world_size() > 1:
         dist.barrier()
@@ -57,9 +58,7 @@ def get_evaluate_file(predict_file):
 
 
 
-def test(args, test_dataloader, VTmodel, GPTmodel, tokenizer, predict_file):
-
-    #tokenizer = tokenizer.tokenizer
+def test(args, test_dataloader, VTmodel, GPTmodel, tokenizer, predict_file, epoch):
 
     world_size = get_world_size()
     if world_size == 1:
@@ -104,12 +103,21 @@ def test(args, test_dataloader, VTmodel, GPTmodel, tokenizer, predict_file):
 
                 visual_frame = visual_frame.to(args.device)
                 prefix_vector = VTmodel(visual_frame, img_keys)
+
+                # Token shift workaround:
+                add = -100 * torch.ones(prefix_vector.shape[0], 1, prefix_vector.shape[2]).to(args.device)  # Shape [batch_size, 1, feature_size]
+                prefix_vector = torch.cat([add, prefix_vector], dim=1)
+
                 outputs = GPTmodel(inputs_embeds=prefix_vector, )
 
                 time_meter += time.time() - tic
                 all_caps = outputs[0]  # batch_size * num_keep_best * max_len
 
-                for img_key, caps in zip(img_keys, all_caps):
+                # To compute accuracy:
+                tokenized_caption = tokenizer.tokenize_caption_for_eval(args, caption)
+                batch_accuracy = torch.tensor([]).to(args.device)
+
+                for img_key, caps, GT in zip(img_keys, all_caps, tokenized_caption):
                     res = []
                     
                     caps = torch.max(caps, -1)[1].data
@@ -120,21 +128,20 @@ def test(args, test_dataloader, VTmodel, GPTmodel, tokenizer, predict_file):
                         img_key = img_key.item()
                     yield img_key, json.dumps(res)
 
-            #Compute batch accuracy:
-            # Tokenize and pad caption:
-            tokenized_caption = tokenizer.tokenize_caption(args, caption)
-            encoded_amended = tokenized_caption[:, 1:]
-            correct_preds = (caps == encoded_amended[0])
-            batch_acc = torch.mean(correct_preds.float())
+                    #Compute batch accuracy:
+                    append_token = torch.tensor([50256], dtype=torch.long).to(args.device)
+                    caps = torch.cat([append_token, caps], dim=0)
 
-            acc_dict = {'acc': float(batch_acc)}
-
-            if world_size > 1:
-                dist.barrier()
-            if args.rank == 0:
-                wandb.log({"Validation Accuracy": acc_dict['acc']}, step=step)
-            if world_size > 1:
-                dist.barrier()
+                    correct_preds = (caps == GT).float()
+                    batch_accuracy = torch.cat((batch_accuracy, correct_preds))
+                
+                if world_size > 1:
+                    dist.barrier()
+                
+                batch_acc = torch.mean(batch_accuracy)
+                batch_acc = float(batch_acc)
+                if args.rank == 0:
+                    wandb.log({"Validation Accuracy": batch_acc}, step=epoch)
 
 
         logger.info(
