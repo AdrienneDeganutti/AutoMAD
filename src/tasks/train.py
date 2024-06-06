@@ -43,10 +43,15 @@ from datetime import timedelta
 def compute_score_with_logits(logits, labels):
     logits = torch.max(logits, -1)[1].data  # argmax
     #workaround:
-    pred_amended = logits[:, :-1]
-    encoded_amended = labels[:, 1:]
+    #pred_amended = logits[:, :-1]
+    #encoded_amended = labels[:, 1:]
+
+    new_labels = labels[:, 1:]
+    apend_token = 50256
+    add = apend_token * torch.ones((new_labels.size(0), 1), dtype=torch.long).to(args.device)
+    new_labels = torch.cat([new_labels, add], dim=1)
     
-    correct_preds = (pred_amended == encoded_amended)
+    correct_preds = (logits == new_labels)
     return correct_preds
 
 
@@ -68,8 +73,9 @@ def mixed_precision_init(args, VTmodel, GPTmodel):
         optimizer = AdamW(combined_parameters, lr=args.learning_rate, eps=args.adam_epsilon)
 
     if args.scheduler == "warmup_linear":
-        from warmup_scheduler import GradualWarmupScheduler
-        scheduler = GradualWarmupScheduler(optimizer, multiplier=1, total_epoch=args.warmup_ratio * max_global_step, after_scheduler=CosineAnnealingLR(optimizer, T_max=max_global_step))
+        scheduler = WarmupLinearLR(optimizer,
+                                   max_global_step,
+                                   warmup_ratio=args.warmup_ratio)
     else:
         scheduler = CosineAnnealingLR(optimizer, T_max=max_global_step)
 
@@ -85,12 +91,12 @@ def mixed_precision_init(args, VTmodel, GPTmodel):
 
 
 
-def train(args, train_dataloader, val_dataloader, VTmodel, GPTmodel, tokenizer,
+def train(args, train_dataloader, val_dataloader, test_dataloader, VTmodel, GPTmodel, tokenizer,
           training_saver, optimizer, scheduler):
     
     # Initialize wandb
     if args.rank == 0:
-        wandb.init(project="Auto-MAD", name="50ep-dual-models", settings=wandb.Settings(_service_wait=300))
+        wandb.init(project="Auto-MAD", name="32-clips-Batch-Size-8-test", settings=wandb.Settings(_service_wait=300))
 
     meters = MetricLogger(delimiter='  ')
     max_iter = args.max_iter
@@ -207,7 +213,7 @@ def train(args, train_dataloader, val_dataloader, VTmodel, GPTmodel, tokenizer,
                 if args.rank == 0:
                     wandb.log({"Gradient Norm": grad_norm,
                                 "Training Loss": loss_dict['loss'],
-                                "Accuracy": loss_dict['acc'],
+                                "Training Accuracy": loss_dict['acc'],
                             }, step=epoch)
 
 
@@ -218,9 +224,9 @@ def train(args, train_dataloader, val_dataloader, VTmodel, GPTmodel, tokenizer,
                 checkpoint_dir = op.join(args.output_dir, 'checkpoint-{}-{}'.format(epoch, global_step))
                 if get_world_size() > 1:
                     dist.barrier()
-                if args.freeze_lm:
-                    training_saver.save_model(checkpoint_dir, global_step, VTmodel, optimizer, model_name='VTmodel')
-                else:
+                #if args.freeze_lm:
+                #    training_saver.save_model(checkpoint_dir, global_step, VTmodel, optimizer, model_name='VTmodel')
+                if epoch % 9 == 0:
                     training_saver.save_model(checkpoint_dir, global_step, VTmodel, optimizer, model_name='VTmodel')
                     training_saver.save_model(checkpoint_dir, global_step, GPTmodel, optimizer, model_name='GPTmodel')
 
@@ -228,7 +234,7 @@ def train(args, train_dataloader, val_dataloader, VTmodel, GPTmodel, tokenizer,
                     dist.barrier()
                 if args.evaluate_during_training:
                     logger.info(f"Perform evaluation at iteration {iteration}, global_step {global_step}")
-                    evaluate_file = evaluate(args, val_dataloader, VTmodel, GPTmodel, tokenizer, checkpoint_dir)
+                    evaluate_file = evaluate(args, val_dataloader, VTmodel, GPTmodel, tokenizer, checkpoint_dir, epoch)
 
                     if get_world_size() > 1:
                         dist.barrier()
@@ -319,6 +325,11 @@ def main(args):
                                           args.val_yaml,
                                           args.distributed,
                                           is_train=False)
+        
+        test_dataloader = make_data_loader(args,
+                                          args.test_yaml,
+                                          args.distributed,
+                                          is_train=False)
 
         args.max_iter = len(train_dataloader)
         args.max_global_step = args.max_iter // args.gradient_accumulation_steps
@@ -328,8 +339,8 @@ def main(args):
         args, VTmodel, GPTmodel, optimizer, scheduler = mixed_precision_init(
             args, VTmodel, GPTmodel)
         
-        train(args, train_dataloader, val_dataloader, VTmodel, GPTmodel, tokenizer,
-              training_saver, optimizer, scheduler)
+        train(args, train_dataloader, val_dataloader, test_dataloader, VTmodel, GPTmodel, 
+              tokenizer, training_saver, optimizer, scheduler)
 
 
     if args.distributed:
