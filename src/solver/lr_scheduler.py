@@ -117,6 +117,13 @@ class WarmupLinearLR(torch.optim.lr_scheduler._LRScheduler):
         tot_step = self.max_iter
         warmup_step = self.warmup_iters
         step = self.last_epoch
+
+        # Check to avoid division by zero
+        if tot_step == warmup_step:
+            # This means the entire training is considered as warmup
+            # Handle this edge case, e.g., return 1 or another appropriate value
+            return 1
+    
         if step < warmup_step:
             return max(0, step / warmup_step)
         return max(0, (tot_step - step) / (tot_step - warmup_step))
