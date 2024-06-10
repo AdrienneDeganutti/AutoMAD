@@ -87,15 +87,6 @@ class PerceiverEncoder(nn.Module):
             nn.init.normal_(block.mlp.c_proj.weight, std=proj_std)
 
     def forward(self, visual_feature, img_ID, key_padding_mask=None):
-        if visual_feature.dim() == 2:
-            temp_device = visual_feature.device
-            f = open("/home/adrienne/AutoMAD/output/error-files.txt", "a")
-            f.write(img_ID[0])
-            f.write('\n')
-            f.close()
-            visual_feature = torch.randn(1, 8, 512)
-            visual_feature = visual_feature.to(temp_device)
-        
         B, T, *_ = visual_feature.shape
         visual_feature = rearrange(visual_feature, 'b t c -> t b c')
         temp_pos = self.temporal_pos_embed[0:T, None, :]
