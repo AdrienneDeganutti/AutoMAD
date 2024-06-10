@@ -309,7 +309,7 @@ def main(args):
 
     logger.info(f'Result of loading VT weights: {VT_rst}')
 
-    checkpoint_dir = op.join(args.output_dir, 'inference-subsampled-1frame')
+    checkpoint_dir = op.join('output', 'inference-debugging', 'training-batch-8-100ep-checkpoint-50')
 
     GPTmodel.to(args.device)
     VTmodel.to(args.device)
@@ -318,7 +318,7 @@ def main(args):
 
     eval_log = []
     best_score = 0
-    args.test_yaml = 'metadata/test_8frames.yaml'
+    args.test_yaml = 'metadata/train_8frames.yaml'
 
     test_dataloader = make_data_loader(args,
                                         args.test_yaml,
