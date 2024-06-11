@@ -339,14 +339,12 @@ class SharedConfigs(object):
                                  type=str,
                                  required=False,
                                  help="Yaml file with all data for validation")
-        self.parser.add_argument(
-            "--test_yaml",
-            default='metadata/test_8frames.yaml',
-            type=str,
-            required=False,
-            nargs='+',
-            help="Yaml file with all data for testing, could be multiple files."
-        )
+        self.parser.add_argument("--test_yaml",
+                                default='metadata/test_8frames.yaml',
+                                type=str,
+                                required=False,
+                                nargs='+',
+                                help="Yaml file with all data for testing, could be multiple files.")
 
         self.parser.add_argument("--do_train",
                                  type=str_to_bool,
