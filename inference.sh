@@ -1,8 +1,9 @@
 python \
     src/tasks/inference.py \
-    --eval_LMmodel_dir output/full-dataset-30ep/ \
-    --eval_ViTmodel_dir output/full-dataset-30ep/ \
-    --test_video_fname datasets/test/video_file.mp4 \
-    --test_features /datasets/test/8_frames_test_features.tsv \
+    --eval_model_dir output/full-Batch-Size-8-ep100/ \
+    --checkpoint_dir checkpoint-81-619083/ \
+    --test_video_fname datasets/test/ \
+    --test_features datasets/8_frames_tsv/train_segmented_features.tsv \
+    --test_yaml metadata/train_8frames.yaml \
     --do_lower_case \
     --do_test \

@@ -144,7 +144,7 @@ def get_evaluate_file(predict_file):
 def evaluate(args, test_dataloader, VTmodel, GPTmodel, tokenizer, output_dir):
     
     predict_file = get_predict_file(output_dir, args, test_dataloader.dataset.yaml_file)
-    batch_inference(args, test_dataloader, VTmodel, GPTmodel, tokenizer, predict_file)
+    inference(args, test_dataloader, VTmodel, GPTmodel, tokenizer, predict_file)
 
     evaluate_file = get_evaluate_file(predict_file)
     if is_main_process():
@@ -159,7 +159,7 @@ def evaluate(args, test_dataloader, VTmodel, GPTmodel, tokenizer, output_dir):
     return evaluate_file
 
 
-def batch_inference(args, test_dataloader, VTmodel, GPTmodel, tokenizer, predict_file):
+def inference(args, test_dataloader, VTmodel, GPTmodel, tokenizer, predict_file):
 
     tokenizer = tokenizer.tokenizer
 
@@ -212,12 +212,16 @@ def batch_inference(args, test_dataloader, VTmodel, GPTmodel, tokenizer, predict
         
 
                 prefix_vector = VTmodel(visual_frame, img_keys)
+
+                # Token shift workaround:
+                add = -100 * torch.ones(prefix_vector.shape[0], 1, prefix_vector.shape[2]).to(args.device)  # Shape [batch_size, 1, feature_size]
+                prefix_vector = torch.cat([add, prefix_vector], dim=1)
+
                 outputs = GPTmodel(inputs_embeds=prefix_vector, )
 
 
                 time_meter = time.time() - tic
-                all_caps = outputs[0]  # batch_size * num_keep_best * max_len
-                #all_confs = torch.exp(outputs[1])
+                all_caps = outputs[0]
 
                 for img_key, caps in zip(img_keys, all_caps):
                     res = []
@@ -309,7 +313,7 @@ def main(args):
 
     logger.info(f'Result of loading VT weights: {VT_rst}')
 
-    checkpoint_dir = op.join('output', 'inference-debugging', 'training-batch-8-100ep-checkpoint-50')
+    checkpoint_dir = op.join('output', 'inference', args.eval_model_dir.split('/')[1], args.resume_LMcheckpoint.split('/')[2])
 
     GPTmodel.to(args.device)
     VTmodel.to(args.device)
@@ -318,10 +322,9 @@ def main(args):
 
     eval_log = []
     best_score = 0
-    args.test_yaml = 'metadata/train_8frames.yaml'
 
     test_dataloader = make_data_loader(args,
-                                        args.test_yaml,
+                                        args.test_yaml[0],
                                         tokenizer,
                                         is_distributed=False,
                                         is_train=False)
@@ -331,7 +334,6 @@ def main(args):
     with open(evaluate_file, 'r') as f:
         res = json.load(f)
     best_score = max(best_score, res['CIDEr'])
-    res['checkpoint'] = '100ep-dual-models'
     res['best_CIDEr'] = best_score
     eval_log.append(res)
     with open(op.join(checkpoint_dir, args.val_yaml.replace('/', '_') + 'eval_logs.json'), 'w') as f:
