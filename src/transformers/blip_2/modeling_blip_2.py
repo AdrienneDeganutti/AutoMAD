@@ -39,7 +39,7 @@ from src.transformers.utils import (
     logging,
     replace_return_docstrings,
 )
-from src.transformers.modeling_auto import AutoModelForCausalLM, AutoModelForSeq2SeqLM
+from src.transformers.auto import AutoModelForCausalLM, AutoModelForSeq2SeqLM
 from .configuration_blip_2 import Blip2Config, Blip2QFormerConfig, Blip2VisionConfig
 
 
