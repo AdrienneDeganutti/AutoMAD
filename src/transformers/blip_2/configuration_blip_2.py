@@ -18,7 +18,7 @@ import os
 from typing import Union
 
 from src.transformers.configuration_utils import PretrainedConfig
-from AutoMAD.src.transformers.auto.modeling_auto import MODEL_FOR_CAUSAL_LM_MAPPING_NAMES
+from src.transformers.auto.modeling_auto import MODEL_FOR_CAUSAL_LM_MAPPING_NAMES
 from src.transformers.utils import logging
 from src.transformers.auto import CONFIG_MAPPING
 

@@ -21,7 +21,7 @@ from typing import List, Optional, Union
 from src.transformers.image_utils import ImageInput
 from src.transformers.processing_utils import ProcessorMixin
 from src.transformers.tokenization_utils_base import BatchEncoding, PaddingStrategy, PreTokenizedInput, TextInput, TruncationStrategy
-from ...utils import TensorType
+from src.transformers.utils import TensorType
 
 
 class Blip2Processor(ProcessorMixin):

@@ -14,7 +14,7 @@
 
 from typing import TYPE_CHECKING
 
-from ...utils import (
+from src.transformers.utils import (
     OptionalDependencyNotAvailable,
     _LazyModule,
     is_flax_available,
