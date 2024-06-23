@@ -6,6 +6,8 @@ import torch.distributed as dist
 import os.path as op
 
 from tqdm import tqdm
+from src.evalcap.coco_caption.pycocotools.coco import COCO
+from src.evalcap.coco_caption.pycocoevalcap.eval import COCOEvalCap
 from src.utils.logger import LOGGER as logger
 from src.evalcap.utils_caption_evaluate import evaluate_on_coco_caption
 from src.utils.comm import get_rank, get_world_size, is_main_process
@@ -72,6 +74,23 @@ class Evaluation:
             test_log.append(test_res)
             with open(op.join(self.args.output_dir, self.args.test_yaml.replace('/', '_') + 'test_logs.json'), 'w') as f:
                 json.dump(test_log, f)
+        
+        if get_world_size() > 1:
+            dist.barrier()
+
+        if is_main_process():
+            wandb.log({"Validation Accuracy (CIDEr)": val_res['CIDEr'],
+                       "Testing Accuracy (CIDEr)": test_res['CIDEr']}, step=epoch)
+        
+            #Evaluate individual captions for Validation split:
+            val_file = (self.args.val_yaml.split('.')[0]).split('/')[1]
+            json_predictions_dir = op.join(checkpoint_dir, f'pred.metadata.{val_file}.beam1.max75_coco_format.json')
+            self.evaluate_individual_captions(val_caption_file, json_predictions_dir)
+
+            #Evaluate individual captions for Testing split:
+            test_file = (self.args.test_yaml.split('.')[0]).split('/')[1]
+            test_json_predictions_dir = op.join(checkpoint_dir, f'pred.metadata.{test_file}.beam1.max75_coco_format.json')
+            self.evaluate_individual_captions(test_caption_file, test_json_predictions_dir)
         
         if get_world_size() > 1:
             dist.barrier()
@@ -148,10 +167,10 @@ class Evaluation:
                     all_caps = outputs[0]  # batch_size * num_keep_best * max_len
 
                     # To compute accuracy:
-                    tokenized_caption = self.tokenizer.tokenize_caption_for_eval(self.args, caption)
-                    batch_accuracy = torch.tensor([]).to(self.args.device)
+                    #tokenized_caption = self.tokenizer.tokenize_caption_for_eval(self.args, caption)
+                    #batch_accuracy = torch.tensor([]).to(self.args.device)
 
-                    for img_key, caps, GT in zip(img_keys, all_caps, tokenized_caption):
+                    for img_key, caps in zip(img_keys, all_caps):
                         res = []
                         caps = torch.max(caps, -1)[1].data
                         cap = self.tokenizer.tokenizer.decode(caps, skip_special_tokens=True)
@@ -162,24 +181,24 @@ class Evaluation:
                         yield img_key, json.dumps(res)
 
                         #Compute batch accuracy:
-                        append_token = torch.tensor([50256], dtype=torch.long).to(self.args.device)
-                        caps = torch.cat([append_token, caps], dim=0)
+                        #append_token = torch.tensor([50256], dtype=torch.long).to(self.args.device)
+                        #caps = torch.cat([append_token, caps], dim=0)
 
-                        correct_preds = (caps == GT).float()
-                        batch_accuracy = torch.cat((batch_accuracy, correct_preds))
+                        #correct_preds = (caps == GT).float()
+                        #batch_accuracy = torch.cat((batch_accuracy, correct_preds))
                 
                     if world_size > 1:
                         dist.barrier()
                 
-                    batch_acc = torch.mean(batch_accuracy)
-                    batch_acc = float(batch_acc)
+                    #batch_acc = torch.mean(batch_accuracy)
+                    #batch_acc = float(batch_acc)
                     
-                    if type == 'val':
-                        if self.args.rank == 0:
-                            wandb.log({"Validation Accuracy": batch_acc}, step=epoch)
-                    if type == 'test':
-                        if self.args.rank == 0:
-                            wandb.log({"Test Accuracy": batch_acc}, step=epoch)
+                    #if type == 'val':
+                    #    if self.args.rank == 0:
+                    #        wandb.log({"Validation Accuracy": batch_acc}, step=epoch)
+                    #if type == 'test':
+                    #    if self.args.rank == 0:
+                    #        wandb.log({"Test Accuracy": batch_acc}, step=epoch)
 
 
             logger.info(f"Inference model computing time: {(time_meter / (step+1))} seconds per batch")
@@ -198,3 +217,48 @@ class Evaluation:
             reorder_tsv_keys(predict_file, dataloader.dataset.image_keys, predict_file)
         if world_size > 1:
             dist.barrier()
+
+
+    def evaluate_individual_captions(self, ground_truth, predictions_file):
+        logger.info('Beginning Caption-level evaluation...')
+
+        coco = COCO(ground_truth)
+        cocoRes = coco.loadRes(predictions_file)
+
+        img_ids = cocoRes.getImgIds()
+
+        caption_results = {}
+        scores = []
+        for img_id in img_ids:
+            cocoEval = COCOEvalCap(coco, cocoRes, 'corpus')
+            cocoEval.params['image_id'] = [img_id]
+            cocoEval.evaluate()
+
+            caption_results[img_id] = cocoEval.evalImgs[0]
+            scores.append((img_id, cocoEval.evalImgs[0]['CIDEr']))  # Collecting CIDER scores
+        
+        with open(predictions_file, 'r') as f:
+            caption_predictions = json.load(f)
+            
+        for caption in caption_predictions:
+            img_id = caption['image_id']
+            if img_id in caption_results:
+                caption['results'] = caption_results[img_id]
+
+        # Calculate top-3 and lowest-3 img_IDs based on CIDEr scores
+        scores.sort(key=lambda x: x[1], reverse=True)
+        top_3 = scores[:3]
+        lowest_3 = scores[-3:]
+
+        output_data = {
+            "predictions": caption_predictions,
+            "top_3_highest_rated": [img_id for img_id, _ in top_3],
+            "lowest_3_rated": [img_id for img_id, _ in lowest_3]
+        }
+
+
+        output_file_path = predictions_file.replace('.beam1.max75_coco_format.json', '.caption_metrics.json')
+        with open(output_file_path, 'w') as f:
+            json.dump(output_data, f, indent=4)
+        
+        logger.info(f'\nUpdated predictions with individual scores saved to {output_file_path}')
