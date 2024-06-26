@@ -2,14 +2,11 @@ from __future__ import absolute_import, division, print_function
 
 import os
 import sys
-import pickle as pkl
-import pandas as pd
 
 pythonpath = os.path.abspath(
     os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 print(pythonpath)
 sys.path.insert(0, pythonpath)
-import json
 import os.path as op
 import time
 import wandb
@@ -94,7 +91,7 @@ def train(args, train_dataloader, val_dataloader, test_dataloader, VTmodel, GPTm
     
     # Initialize wandb
     if args.rank == 0:
-        wandb.init(project="Auto-MAD", name="full-batch-size-1-ep100", settings=wandb.Settings(_service_wait=300))
+        wandb.init(project="Auto-MAD-v2", name="full-Batch-Size-8-ep30", settings=wandb.Settings(_service_wait=300))
 
     meters = MetricLogger(delimiter='  ')
     max_iter = args.max_iter
