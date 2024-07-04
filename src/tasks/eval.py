@@ -83,14 +83,14 @@ class Evaluation:
                        "Testing Accuracy (CIDEr)": test_res['CIDEr']}, step=epoch)
         
             #Evaluate individual captions for Validation split:
-            val_file = (self.args.val_yaml.split('.')[0]).split('/')[1]
-            json_predictions_dir = op.join(checkpoint_dir, f'pred.metadata.{val_file}.beam1.max75_coco_format.json')
-            self.evaluate_individual_captions(val_caption_file, json_predictions_dir)
+            #val_file = (self.args.val_yaml.split('.')[0]).split('/')[1]
+            #json_predictions_dir = op.join(checkpoint_dir, f'pred.metadata.{val_file}.beam1.max75_coco_format.json')
+            #self.evaluate_individual_captions(val_caption_file, json_predictions_dir)
 
             #Evaluate individual captions for Testing split:
-            test_file = (self.args.test_yaml.split('.')[0]).split('/')[1]
-            test_json_predictions_dir = op.join(checkpoint_dir, f'pred.metadata.{test_file}.beam1.max75_coco_format.json')
-            self.evaluate_individual_captions(test_caption_file, test_json_predictions_dir)
+            #test_file = (self.args.test_yaml.split('.')[0]).split('/')[1]
+            #test_json_predictions_dir = op.join(checkpoint_dir, f'pred.metadata.{test_file}.beam1.max75_coco_format.json')
+            #self.evaluate_individual_captions(test_caption_file, test_json_predictions_dir)
         
         if get_world_size() > 1:
             dist.barrier()
@@ -246,14 +246,14 @@ class Evaluation:
                 caption['results'] = caption_results[img_id]
 
         # Calculate top-3 and lowest-3 img_IDs based on CIDEr scores
-        scores.sort(key=lambda x: x[1], reverse=True)
-        top_3 = scores[:3]
-        lowest_3 = scores[-3:]
+        #scores.sort(key=lambda x: x[1], reverse=True)
+        #top_3 = scores[:3]
+        #lowest_3 = scores[-3:]
 
         output_data = {
             "predictions": caption_predictions,
-            "top_3_highest_rated": [img_id for img_id, _ in top_3],
-            "lowest_3_rated": [img_id for img_id, _ in lowest_3]
+        #    "top_3_highest_rated": [img_id for img_id, _ in top_3],
+        #    "lowest_3_rated": [img_id for img_id, _ in lowest_3]
         }
 
 
